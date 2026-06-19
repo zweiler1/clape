@@ -124,10 +124,21 @@ typedef struct clape_value_t {
     } value;
 } clape_value_t;
 
+/// @enum `clape_binop_e`
+/// @brief The enum for binary operator types
+typedef enum {
+    CLAPE_BINOP_ADD,
+    CLAPE_BINOP_SUB,
+    CLAPE_BINOP_MUL,
+    CLAPE_BINOP_DIV,
+} clape_binop_e;
+
 /// @enum `clape_expr_e`
 /// @brief The enum to tag the clape expr with
 typedef enum {
     CLAPE_EXPR_LIT,
+    CLAPE_EXPR_IDENT,
+    CLAPE_EXPR_BINOP,
 } clape_expr_e;
 
 /// @struct `clape_expr_t`
@@ -143,6 +154,18 @@ typedef struct clape_expr_t {
         /// @variation `lit`
         /// @brief A `lit` variation is a literal like `69`, `3.14`, `true` or `false`
         clape_value_t lit;
+
+        /// @variation `ident`
+        /// @brief An identifier reference
+        char *ident;
+
+        /// @variation `binop`
+        /// @brief A binary operation expression
+        struct {
+            clape_binop_e op;
+            struct clape_expr_t *lhs;
+            struct clape_expr_t *rhs;
+        } binop;
     } value;
 } clape_expr_t;
 
@@ -432,64 +455,203 @@ void clape_free_program(clape_program_t *const program);
 
 #ifdef CLAPE_IMPLEMENTATION
 
-bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
-    program->statements = clape_arr_create(sizeof(clape_stmt_t), 0);
-    for (size_t i = 0; i < tokens->len; i++) {
-        token_t *const token = ACCESS_ARR_AT(token_t, tokens, i);
-        if (token->tag != TOK_LET) {
-            fprintf(stderr, "Error: Statements must begin with a 'let' keyword\n");
-            fprintf(stderr, "- Got the '");
-            clape_print_token(stderr, token);
-            fprintf(stderr, "' token instead\n");
-            return false;
-        }
-        token_t *const ident = token + 1;
-        if (ident->tag != TOK_IDENTIFIER) {
-            fprintf(stderr, "Error: Missing name of statement\n");
-            return false;
-        }
-        if ((ident + 1)->tag != TOK_EQ) {
-            fprintf(stderr, "Error: Expected token '=' but got'");
-            clape_print_token(stderr, token);
-            fprintf(stderr, "'\n");
-            return false;
-        }
-        // Consume all tokens until the next `let` or `EOF` token, all tokens in between are
-        // considered the expression tokens
-        token_t *start = token + 3;
-        token_t *end = start;
-        while (end->tag != TOK_LET && end->tag != TOK_EOF) {
-            end++;
-        }
-        // Okay so all tokens from start->end now are the expression tokens...
-        while (start != end) {
-            printf("expr_token = ");
-            clape_print_token(stdout, start);
-            printf("\n");
-            start++;
-        }
-        printf("\n");
+// Forward-declarations
+char *strdup(const char *s);
 
-        i += end - token - 1;
-        if (end->tag == TOK_EOF) {
+// ----- Parser helpers -----
+
+typedef enum {
+    CLAPE_BINDING_POWER_DEFAULT,
+    CLAPE_BINDING_POWER_TERM,
+    CLAPE_BINDING_POWER_FACTOR,
+} clape_binding_power_t;
+
+typedef struct {
+    clape_arr_t *tokens;
+    size_t pos;
+} clape_parser_t;
+
+static token_t *clape_peek(clape_parser_t *p) {
+    return ACCESS_ARR_AT(token_t, p->tokens, p->pos);
+}
+
+static token_t *clape_advance(clape_parser_t *p) {
+    return ACCESS_ARR_AT(token_t, p->tokens, p->pos++);
+}
+
+static clape_binding_power_t clape_infix_bp(token_type_e tag) {
+    switch (tag) {
+        case TOK_PLUS:
+        case TOK_MINUS:
+            return CLAPE_BINDING_POWER_TERM;
+        case TOK_MUL:
+        case TOK_DIV:
+            return CLAPE_BINDING_POWER_FACTOR;
+        default:
+            return CLAPE_BINDING_POWER_DEFAULT;
+    }
+}
+
+static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t min_bp) {
+    token_t *tok = clape_advance(p);
+    clape_expr_t lhs;
+
+    switch (tok->tag) {
+        case TOK_INT:
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_LIT,
+                .value.lit = (clape_value_t){.tag = CLAPE_VAL_INT, .value.ival = tok->value.ival},
+            };
             break;
+        case TOK_IDENTIFIER:
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_IDENT,
+                .value.ident = strdup(tok->value.identifier),
+            };
+            break;
+        default:
+            fprintf(stderr, "Unexpected token in expression: ");
+            clape_print_token(stderr, tok);
+            fprintf(stderr, "\n");
+            exit(1);
+    }
+
+    while (clape_infix_bp(clape_peek(p)->tag) > min_bp) {
+        token_t *op_tok = clape_advance(p);
+        clape_binop_e op;
+        clape_binding_power_t cur_bp;
+        switch (op_tok->tag) {
+            case TOK_PLUS:
+                op = CLAPE_BINOP_ADD;
+                cur_bp = CLAPE_BINDING_POWER_TERM;
+                break;
+            case TOK_MINUS:
+                op = CLAPE_BINOP_SUB;
+                cur_bp = CLAPE_BINDING_POWER_TERM;
+                break;
+            case TOK_MUL:
+                op = CLAPE_BINOP_MUL;
+                cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                break;
+            case TOK_DIV:
+                op = CLAPE_BINOP_DIV;
+                cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                break;
+            default:
+                fprintf(stderr, "Unexpected infix operator\n");
+                exit(1);
         }
+        clape_expr_t rhs = clape_parse_expr(p, cur_bp);
+        clape_expr_t *lhs_ptr = malloc(sizeof(clape_expr_t));
+        *lhs_ptr = lhs;
+        clape_expr_t *rhs_ptr = malloc(sizeof(clape_expr_t));
+        *rhs_ptr = rhs;
+        lhs = (clape_expr_t){
+            .tag = CLAPE_EXPR_BINOP,
+            .value.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
+        };
+    }
+    return lhs;
+}
+
+static clape_stmt_t clape_parse_stmt(clape_parser_t *p) {
+    clape_advance(p);
+    token_t *name_tok = clape_advance(p);
+    clape_advance(p);
+    clape_stmt_t stmt = {
+        .name = strdup(name_tok->value.identifier),
+        .expr = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT),
+    };
+    return stmt;
+}
+
+// ----- Public API -----
+
+bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
+    clape_parser_t p = {.tokens = tokens, .pos = 0};
+    program->statements = clape_arr_create(sizeof(clape_stmt_t), 0);
+    while (clape_peek(&p)->tag != TOK_EOF) {
+        if (clape_peek(&p)->tag != TOK_LET) {
+            fprintf(stderr, "Expected 'let' at start of statement\n");
+            return false;
+        }
+        clape_stmt_t stmt = clape_parse_stmt(&p);
+        clape_arr_append(sizeof(clape_stmt_t), &program->statements, &stmt);
     }
     return true;
 }
 
+static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
+    switch (expr->tag) {
+        case CLAPE_EXPR_LIT:
+            fprintf(stream, "%li", expr->value.lit.value.ival);
+            break;
+        case CLAPE_EXPR_IDENT:
+            fprintf(stream, "%s", expr->value.ident);
+            break;
+        case CLAPE_EXPR_BINOP: {
+            const char *op_str;
+            switch (expr->value.binop.op) {
+                case CLAPE_BINOP_ADD:
+                    op_str = "+";
+                    break;
+                case CLAPE_BINOP_SUB:
+                    op_str = "-";
+                    break;
+                case CLAPE_BINOP_MUL:
+                    op_str = "*";
+                    break;
+                case CLAPE_BINOP_DIV:
+                    op_str = "/";
+                    break;
+            }
+            fprintf(stream, "(");
+            clape_print_expr(stream, expr->value.binop.lhs);
+            fprintf(stream, " %s ", op_str);
+            clape_print_expr(stream, expr->value.binop.rhs);
+            fprintf(stream, ")");
+            break;
+        }
+    }
+}
+
 void clape_print_program(clape_program_t *const program) {
-    (void)program;
+    for (size_t i = 0; i < program->statements->len; i++) {
+        clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
+        fprintf(stdout, "(let %s = ", stmt->name);
+        clape_print_expr(stdout, &stmt->expr);
+        fprintf(stdout, ")\n");
+    }
+}
+
+static void clape_free_expr(clape_expr_t *expr) {
+    switch (expr->tag) {
+        case CLAPE_EXPR_LIT:
+            break;
+        case CLAPE_EXPR_IDENT:
+            free(expr->value.ident);
+            break;
+        case CLAPE_EXPR_BINOP:
+            clape_free_expr(expr->value.binop.lhs);
+            clape_free_expr(expr->value.binop.rhs);
+            free(expr->value.binop.lhs);
+            free(expr->value.binop.rhs);
+            break;
+    }
 }
 
 void clape_free_program(clape_program_t *const program) {
-    if (program->statements == NULL) {
+    if (!program->statements) {
         return;
     }
     for (size_t i = 0; i < program->statements->len; i++) {
-        clape_stmt_t *const stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
-        (void)stmt;
+        clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
+        if (stmt->name != NULL) {
+            free(stmt->name);
+        }
+        clape_free_expr(&stmt->expr);
     }
+    free(program->statements);
 }
 
 #endif

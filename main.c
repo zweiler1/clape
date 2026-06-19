@@ -109,13 +109,6 @@ int main(int argc, char *args[]) {
 
     clape_arr_t *const tokens = clape_tokenize(loaded_file);
     defer(clape_free_tokens, tokens);
-    for (size_t i = 0; i < tokens->len; i++) {
-        token_t *const token = ACCESS_ARR_AT(token_t, tokens, i);
-        printf("tokens[%lu] = ", i);
-        clape_print_token(stdout, token);
-        printf("\n");
-    }
-    printf("\n");
 
     clape_program_t program = {0};
     defer(clape_free_program, &program);
