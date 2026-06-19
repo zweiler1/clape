@@ -115,7 +115,7 @@ int main(int argc, char *args[]) {
     if (!clape_parse(&program, tokens)) {
         return 1;
     }
-    clape_print_program(&program);
+    clape_interpret(&program);
 
     return 0;
 }

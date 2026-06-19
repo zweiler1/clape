@@ -102,15 +102,17 @@ static inline void _defer_cleanup(struct _defer_ctx *ctx) {
 /// @brief The enum to tag the clape value with
 typedef enum {
     CLAPE_VAL_INT,
-    // TODO:
-    // CLAPE_VAL_FLOAT,
-    // CLAPE_VAL_PRODUCT,
-    // CLAPE_VAL_LIST,
+    CLAPE_VAL_FUNC,
+    CLAPE_VAL_UNIT,
 } clape_value_e;
+
+/// Forward declaration for self-referencing function pointer
+typedef struct clape_value_t clape_value_t;
+typedef clape_value_t (*clape_builtin_fn)(clape_value_t);
 
 /// @struct `clape_value_t`
 /// @brief Represents a single clape value
-typedef struct clape_value_t {
+struct clape_value_t {
     /// @var `tag`
     /// @brief The tag telling us which type of value this is
     clape_value_e tag;
@@ -121,8 +123,12 @@ typedef struct clape_value_t {
         /// @variation `ival`
         /// @brief An `Int` literal value
         int64_t ival;
+
+        /// @variation `fn`
+        /// @brief A builtin function pointer
+        clape_builtin_fn fn;
     } value;
-} clape_value_t;
+};
 
 /// @enum `clape_binop_e`
 /// @brief The enum for binary operator types
@@ -139,6 +145,7 @@ typedef enum {
     CLAPE_EXPR_LIT,
     CLAPE_EXPR_IDENT,
     CLAPE_EXPR_BINOP,
+    CLAPE_EXPR_CALL,
 } clape_expr_e;
 
 /// @struct `clape_expr_t`
@@ -166,20 +173,46 @@ typedef struct clape_expr_t {
             struct clape_expr_t *lhs;
             struct clape_expr_t *rhs;
         } binop;
+
+        /// @variation `call`
+        /// @brief A function call expression via juxtaposition
+        struct {
+            struct clape_expr_t *callee;
+            struct clape_expr_t *arg;
+        } call;
     } value;
 } clape_expr_t;
 
-/// @struct `clape_stmt_t`
-/// @brief A clape statement is a `let xyz = ...` line
-typedef struct clape_stmt_t {
-    /// @var `name`
-    /// @brief The name of the SSA initialized value, if the name is NULL, then it's a `let _ = ...`
-    /// line, which marks side-effects
-    char *name;
+/// @enum `clape_stmt_e`
+/// @brief The enum to tag the clape statement with
+typedef enum {
+    STMT_LET,
+    STMT_USE,
+} clape_stmt_e;
 
-    /// @var `expr`
-    /// @brief A single expression which will be the RHS of the SSA statement
-    clape_expr_t expr;
+/// @struct `clape_stmt_t`
+/// @brief A clape statement is either a `let xyz = ...` binding or a `use Module` import
+typedef struct clape_stmt_t {
+    /// @var `tag`
+    /// @brief The tag telling us which type of statement this is
+    clape_stmt_e tag;
+
+    /// @var `value`
+    /// @brief A union of all possible statement types
+    union {
+        /// @variation `let`
+        /// @brief A let-binding statement
+        struct {
+            char *name;
+            clape_expr_t expr;
+        } let;
+
+        /// @variation `use`
+        /// @brief A module import statement
+        struct {
+            char *module;
+        } use;
+    } value;
 } clape_stmt_t;
 
 /// @struct `clape_program_t`
@@ -190,6 +223,22 @@ typedef struct clape_program_t {
     /// of type `clape_stmt_t`
     clape_arr_t *statements;
 } clape_program_t;
+
+/// @struct `clape_env_t`
+/// @brief A linked-list node representing a single binding in the runtime environment
+typedef struct clape_env_t {
+    /// @var `name`
+    /// @brief The bound variable name
+    char *name;
+
+    /// @var `value`
+    /// @brief The bound value
+    clape_value_t value;
+
+    /// @var `next`
+    /// @brief A pointer to the next node in the environment chain
+    struct clape_env_t *next;
+} clape_env_t;
 
 /// @enum `token_type_e`
 /// @brief The enum of all possible Clape token types
@@ -202,6 +251,7 @@ typedef enum : uint8_t {
     TOK_DIV,
     // Keywords
     TOK_LET,
+    TOK_USE,
     // Literals
     TOK_INT,
     // Other
@@ -304,6 +354,13 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             continue;
         }
 
+        if (strncmp(p, "use", 3) == 0 && !isalnum(p[3])) {
+            token_t t = {.tag = TOK_USE};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 3;
+            continue;
+        }
+
         if (is_digit(*p)) {
             int64_t val = 0;
             while (is_digit(*p)) {
@@ -395,6 +452,9 @@ void clape_print_token(FILE *const stream, token_t *const token) {
         case TOK_LET:
             fprintf(stream, "let");
             break;
+        case TOK_USE:
+            fprintf(stream, "use");
+            break;
         case TOK_INT:
             fprintf(stream, "%li", token->value.ival);
             break;
@@ -417,6 +477,7 @@ void clape_free_tokens(clape_arr_t *const tokens) {
             case TOK_MUL:
             case TOK_DIV:
             case TOK_LET:
+            case TOK_USE:
             case TOK_INT:
                 break;
             case TOK_IDENTIFIER:
@@ -464,6 +525,7 @@ typedef enum {
     CLAPE_BINDING_POWER_DEFAULT,
     CLAPE_BINDING_POWER_TERM,
     CLAPE_BINDING_POWER_FACTOR,
+    CLAPE_BINDING_POWER_CALL,
 } clape_binding_power_t;
 
 typedef struct {
@@ -516,51 +578,80 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             exit(1);
     }
 
-    while (clape_infix_bp(clape_peek(p)->tag) > min_bp) {
-        token_t *op_tok = clape_advance(p);
-        clape_binop_e op;
-        clape_binding_power_t cur_bp;
-        switch (op_tok->tag) {
-            case TOK_PLUS:
-                op = CLAPE_BINOP_ADD;
-                cur_bp = CLAPE_BINDING_POWER_TERM;
-                break;
-            case TOK_MINUS:
-                op = CLAPE_BINOP_SUB;
-                cur_bp = CLAPE_BINDING_POWER_TERM;
-                break;
-            case TOK_MUL:
-                op = CLAPE_BINOP_MUL;
-                cur_bp = CLAPE_BINDING_POWER_FACTOR;
-                break;
-            case TOK_DIV:
-                op = CLAPE_BINOP_DIV;
-                cur_bp = CLAPE_BINDING_POWER_FACTOR;
-                break;
-            default:
-                fprintf(stderr, "Unexpected infix operator\n");
-                exit(1);
+    while (true) {
+        token_type_e next = clape_peek(p)->tag;
+        clape_binding_power_t cur_bp = clape_infix_bp(next);
+
+        if (cur_bp > min_bp) {
+            token_t *op_tok = clape_advance(p);
+            clape_binop_e op;
+            switch (op_tok->tag) {
+                case TOK_PLUS:
+                    op = CLAPE_BINOP_ADD;
+                    cur_bp = CLAPE_BINDING_POWER_TERM;
+                    break;
+                case TOK_MINUS:
+                    op = CLAPE_BINOP_SUB;
+                    cur_bp = CLAPE_BINDING_POWER_TERM;
+                    break;
+                case TOK_MUL:
+                    op = CLAPE_BINOP_MUL;
+                    cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                    break;
+                case TOK_DIV:
+                    op = CLAPE_BINOP_DIV;
+                    cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                    break;
+                default:
+                    fprintf(stderr, "Unexpected infix operator\n");
+                    exit(1);
+            }
+            clape_expr_t rhs = clape_parse_expr(p, cur_bp);
+            clape_expr_t *lhs_ptr = malloc(sizeof(clape_expr_t));
+            *lhs_ptr = lhs;
+            clape_expr_t *rhs_ptr = malloc(sizeof(clape_expr_t));
+            *rhs_ptr = rhs;
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_BINOP,
+                .value.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
+            };
+        } else if ((next == TOK_INT || next == TOK_IDENTIFIER) &&
+            CLAPE_BINDING_POWER_CALL > min_bp) {
+            cur_bp = CLAPE_BINDING_POWER_CALL;
+            clape_expr_t arg = clape_parse_expr(p, cur_bp);
+            clape_expr_t *callee_ptr = malloc(sizeof(clape_expr_t));
+            *callee_ptr = lhs;
+            clape_expr_t *arg_ptr = malloc(sizeof(clape_expr_t));
+            *arg_ptr = arg;
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_CALL,
+                .value.call = {.callee = callee_ptr, .arg = arg_ptr},
+            };
+        } else {
+            break;
         }
-        clape_expr_t rhs = clape_parse_expr(p, cur_bp);
-        clape_expr_t *lhs_ptr = malloc(sizeof(clape_expr_t));
-        *lhs_ptr = lhs;
-        clape_expr_t *rhs_ptr = malloc(sizeof(clape_expr_t));
-        *rhs_ptr = rhs;
-        lhs = (clape_expr_t){
-            .tag = CLAPE_EXPR_BINOP,
-            .value.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
-        };
     }
     return lhs;
 }
 
 static clape_stmt_t clape_parse_stmt(clape_parser_t *p) {
-    clape_advance(p);
+    token_t *first = clape_advance(p);
+    if (first->tag == TOK_USE) {
+        token_t *mod_tok = clape_advance(p);
+        return (clape_stmt_t){
+            .tag = STMT_USE,
+            .value.use = {.module = strdup(mod_tok->value.identifier)},
+        };
+    }
     token_t *name_tok = clape_advance(p);
     clape_advance(p);
     clape_stmt_t stmt = {
-        .name = strdup(name_tok->value.identifier),
-        .expr = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT),
+        .tag = STMT_LET,
+        .value.let =
+            {
+                .name = strdup(name_tok->value.identifier),
+                .expr = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT),
+            },
     };
     return stmt;
 }
@@ -571,8 +662,9 @@ bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
     clape_parser_t p = {.tokens = tokens, .pos = 0};
     program->statements = clape_arr_create(sizeof(clape_stmt_t), 0);
     while (clape_peek(&p)->tag != TOK_EOF) {
-        if (clape_peek(&p)->tag != TOK_LET) {
-            fprintf(stderr, "Expected 'let' at start of statement\n");
+        token_type_e t = clape_peek(&p)->tag;
+        if (t != TOK_LET && t != TOK_USE) {
+            fprintf(stderr, "Expected 'let' or 'use' at start of statement\n");
             return false;
         }
         clape_stmt_t stmt = clape_parse_stmt(&p);
@@ -612,15 +704,26 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
             fprintf(stream, ")");
             break;
         }
+        case CLAPE_EXPR_CALL:
+            fprintf(stream, "(");
+            clape_print_expr(stream, expr->value.call.callee);
+            fprintf(stream, " ");
+            clape_print_expr(stream, expr->value.call.arg);
+            fprintf(stream, ")");
+            break;
     }
 }
 
 void clape_print_program(clape_program_t *const program) {
     for (size_t i = 0; i < program->statements->len; i++) {
         clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
-        fprintf(stdout, "(let %s = ", stmt->name);
-        clape_print_expr(stdout, &stmt->expr);
-        fprintf(stdout, ")\n");
+        if (stmt->tag == STMT_LET) {
+            fprintf(stdout, "(let %s = ", stmt->value.let.name);
+            clape_print_expr(stdout, &stmt->value.let.expr);
+            fprintf(stdout, ")\n");
+        } else {
+            fprintf(stdout, "(use %s)\n", stmt->value.use.module);
+        }
     }
 }
 
@@ -637,6 +740,12 @@ static void clape_free_expr(clape_expr_t *expr) {
             free(expr->value.binop.lhs);
             free(expr->value.binop.rhs);
             break;
+        case CLAPE_EXPR_CALL:
+            clape_free_expr(expr->value.call.callee);
+            clape_free_expr(expr->value.call.arg);
+            free(expr->value.call.callee);
+            free(expr->value.call.arg);
+            break;
     }
 }
 
@@ -646,12 +755,138 @@ void clape_free_program(clape_program_t *const program) {
     }
     for (size_t i = 0; i < program->statements->len; i++) {
         clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
-        if (stmt->name != NULL) {
-            free(stmt->name);
+        if (stmt->tag == STMT_LET) {
+            free(stmt->value.let.name);
+            clape_free_expr(&stmt->value.let.expr);
+        } else {
+            free(stmt->value.use.module);
         }
-        clape_free_expr(&stmt->expr);
     }
     free(program->statements);
+}
+
+#endif
+
+// ----- Interpreter -----
+
+/// @function `clape_interpret`
+/// @brief Interprets (executes) a parsed Clape program
+///
+/// @param `program` The program to interpret
+void clape_interpret(clape_program_t *const program);
+
+#ifdef CLAPE_IMPLEMENTATION
+
+static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
+    switch (expr->tag) {
+        case CLAPE_EXPR_LIT:
+            return expr->value.lit;
+        case CLAPE_EXPR_IDENT: {
+            for (clape_env_t *e = env; e; e = e->next) {
+                if (strcmp(e->name, expr->value.ident) == 0) {
+                    return e->value;
+                }
+            }
+            fprintf(stderr, "Undefined variable: %s\n", expr->value.ident);
+            exit(1);
+        }
+        case CLAPE_EXPR_BINOP: {
+            clape_value_t lhs = clape_eval(expr->value.binop.lhs, env);
+            clape_value_t rhs = clape_eval(expr->value.binop.rhs, env);
+            if (lhs.tag != CLAPE_VAL_INT || rhs.tag != CLAPE_VAL_INT) {
+                fprintf(stderr, "Binary operations require integers\n");
+                exit(1);
+            }
+            int64_t result;
+            switch (expr->value.binop.op) {
+                case CLAPE_BINOP_ADD:
+                    result = lhs.value.ival + rhs.value.ival;
+                    break;
+                case CLAPE_BINOP_SUB:
+                    result = lhs.value.ival - rhs.value.ival;
+                    break;
+                case CLAPE_BINOP_MUL:
+                    result = lhs.value.ival * rhs.value.ival;
+                    break;
+                case CLAPE_BINOP_DIV:
+                    result = lhs.value.ival / rhs.value.ival;
+                    break;
+            }
+            return (clape_value_t){.tag = CLAPE_VAL_INT, .value.ival = result};
+        }
+        case CLAPE_EXPR_CALL: {
+            clape_value_t callee = clape_eval(expr->value.call.callee, env);
+            clape_value_t arg = clape_eval(expr->value.call.arg, env);
+            if (callee.tag != CLAPE_VAL_FUNC) {
+                fprintf(stderr, "Attempted to call a non-function value\n");
+                exit(1);
+            }
+            return callee.value.fn(arg);
+        }
+    }
+}
+
+static clape_value_t clape_builtin_print(clape_value_t arg) {
+    switch (arg.tag) {
+        case CLAPE_VAL_INT:
+            printf("%li\n", arg.value.ival);
+            break;
+        case CLAPE_VAL_UNIT:
+            printf("Unit\n");
+            break;
+        case CLAPE_VAL_FUNC:
+            printf("<function>\n");
+            break;
+    }
+    return (clape_value_t){.tag = CLAPE_VAL_UNIT};
+}
+
+static void clape_env_free(clape_env_t *env) {
+    while (env) {
+        clape_env_t *next = env->next;
+        free(env->name);
+        free(env);
+        env = next;
+    }
+}
+
+void clape_interpret(clape_program_t *const program) {
+    clape_env_t *env = NULL;
+
+    for (size_t i = 0; i < program->statements->len; i++) {
+        clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
+
+        if (stmt->tag == STMT_LET) {
+            clape_value_t val = clape_eval(&stmt->value.let.expr, env);
+            if (strcmp(stmt->value.let.name, "_") == 0) {
+                // Discard result for side-effect calls
+            } else {
+                clape_env_t *binding = malloc(sizeof(clape_env_t));
+                *binding = (clape_env_t){
+                    .name = strdup(stmt->value.let.name),
+                    .value = val,
+                    .next = env,
+                };
+                env = binding;
+            }
+        } else {
+            if (strcmp(stmt->value.use.module, "Print") == 0) {
+                clape_env_t *binding = malloc(sizeof(clape_env_t));
+                *binding = (clape_env_t){
+                    .name = strdup("print"),
+                    .value =
+                        (clape_value_t){.tag = CLAPE_VAL_FUNC, .value.fn = clape_builtin_print},
+                    .next = env,
+                };
+                env = binding;
+            } else {
+                fprintf(stderr, "Unknown module: %s\n", stmt->value.use.module);
+                exit(1);
+            }
+        }
+    }
+
+    clape_env_free(env);
 }
 
 #endif
