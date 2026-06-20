@@ -54,3 +54,36 @@ let _ = print (eq "foo" "foo")
 let _ = print (eq "foo" "bar")
 let _ = print ("abc" != "xyz")
 let _ = print ('A' < 'B')
+
+let empty = []
+let _ = print empty
+let nums = [1, 2, 3]
+let _ = print nums
+let more = 0 :: nums
+let _ = print more
+
+let length = (xs: [Int]) -> Int {
+    match xs {
+        [] => 0;
+        h :: t => 1 + (length t)
+    }
+}
+let _ = print (length [10, 20, 30])
+
+let first = (xs: [Int]) -> Int {
+    match xs {
+        h :: t => h
+    }
+}
+let _ = print (first [7, 8, 9])
+
+let _ = print ('x' :: "yz")
+
+let append = (list: [Int], value: Int) -> [Int] {
+    match list {
+        [] => [value];
+        h :: t => h :: append t value
+    }
+}
+let list = [1, 2, 3, 4]
+let _ = print (append list 5)
