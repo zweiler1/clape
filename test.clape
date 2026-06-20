@@ -38,3 +38,19 @@ let fib = (n: Int) -> Int {
     }
 }
 let _ = print (fib 10)
+
+let name = "Clape"
+let greeting = "Hello, " + name + "!"
+let _ = print greeting
+
+let first = 'a'
+let _ = print first
+let _ = print ('z' > 'a')
+let _ = print ('a' == 'a')
+
+let _ = print ("he" + "llo")
+let eq = (x: String, y: String) -> Bool { x == y }
+let _ = print (eq "foo" "foo")
+let _ = print (eq "foo" "bar")
+let _ = print ("abc" != "xyz")
+let _ = print ('A' < 'B')
