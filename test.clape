@@ -1,7 +1,18 @@
 use Print
 
-let x = 10
-let y = 20
-let z = x + y
+let x = 3.14
+let y = 2.0
+let z = x * y
 
+let _ = print x
+let _ = print y
 let _ = print z
+
+let cmp = x > y
+let _ = print cmp
+
+let eq = 42 == 42
+let _ = print eq
+
+let ne = 42 != 42
+let _ = print ne

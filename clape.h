@@ -98,24 +98,45 @@ static inline void _defer_cleanup(struct _defer_ctx *ctx) {
 
 // ------ TYPES ------
 
-/// @enum `clape_value_e`
-/// @brief The enum to tag the clape value with
+/// @enum `clape_type_e`
+/// @brief The enum describing the type of a clape value
 typedef enum {
-    CLAPE_VAL_INT,
-    CLAPE_VAL_FUNC,
-    CLAPE_VAL_UNIT,
-} clape_value_e;
+    CLAPE_TYPE_INT,
+    CLAPE_TYPE_FLOAT,
+    CLAPE_TYPE_BOOL,
+    CLAPE_TYPE_FUNC,
+    CLAPE_TYPE_UNIT,
+} clape_type_e;
+
+/// @struct `clape_type_t`
+/// @brief A richer type descriptor, e.g. function signatures
+typedef struct clape_type_t {
+    /// @var `tag`
+    /// @brief The tag telling us which type this is
+    clape_type_e tag;
+
+    /// @var `value`
+    /// @brief A union of all possible types containing a payload
+    union {
+        /// @variation `func`
+        /// @brief A Function type containing a parameter and return type
+        struct {
+            struct clape_type_t *param;
+            struct clape_type_t *ret;
+        } func;
+    } value;
+} clape_type_t;
 
 /// Forward declaration for self-referencing function pointer
 typedef struct clape_value_t clape_value_t;
 typedef clape_value_t (*clape_builtin_fn)(clape_value_t);
 
 /// @struct `clape_value_t`
-/// @brief Represents a single clape value
+/// @brief Represents a single Clape value
 struct clape_value_t {
-    /// @var `tag`
-    /// @brief The tag telling us which type of value this is
-    clape_value_e tag;
+    /// @var `type`
+    /// @brief The type of this Clape value
+    clape_type_t type;
 
     /// @var `value`
     /// @brief A union of all possible value types
@@ -123,6 +144,14 @@ struct clape_value_t {
         /// @variation `ival`
         /// @brief An `Int` literal value
         int64_t ival;
+
+        /// @variation `fval`
+        /// @brief A `Float` literal value
+        double fval;
+
+        /// @variation `bval`
+        /// @brief A `Bool` literal value
+        bool bval;
 
         /// @variation `fn`
         /// @brief A builtin function pointer
@@ -137,6 +166,12 @@ typedef enum {
     CLAPE_BINOP_SUB,
     CLAPE_BINOP_MUL,
     CLAPE_BINOP_DIV,
+    CLAPE_BINOP_LT,
+    CLAPE_BINOP_GT,
+    CLAPE_BINOP_LE,
+    CLAPE_BINOP_GE,
+    CLAPE_BINOP_EQ,
+    CLAPE_BINOP_NE,
 } clape_binop_e;
 
 /// @enum `clape_expr_e`
@@ -186,8 +221,8 @@ typedef struct clape_expr_t {
 /// @enum `clape_stmt_e`
 /// @brief The enum to tag the clape statement with
 typedef enum {
-    STMT_LET,
-    STMT_USE,
+    CLAPE_STMT_LET,
+    CLAPE_STMT_USE,
 } clape_stmt_e;
 
 /// @struct `clape_stmt_t`
@@ -244,16 +279,25 @@ typedef struct clape_env_t {
 /// @brief The enum of all possible Clape token types
 typedef enum : uint8_t {
     // Symbols
-    TOK_EQ = 0,
-    TOK_PLUS,
+    TOK_PLUS = 0,
     TOK_MINUS,
     TOK_MUL,
     TOK_DIV,
+    TOK_EQ,
+    TOK_EQ_EQ,
+    TOK_NE,
+    TOK_LT,
+    TOK_LE,
+    TOK_GT,
+    TOK_GE,
     // Keywords
     TOK_LET,
     TOK_USE,
     // Literals
+    TOK_TRUE,
+    TOK_FALSE,
     TOK_INT,
+    TOK_FLOAT,
     // Other
     TOK_IDENTIFIER,
     TOK_EOF,
@@ -272,6 +316,10 @@ typedef struct token_t {
         /// @variation `ival`
         /// @brief An `Int` literal value
         int64_t ival;
+
+        /// @variation `fval`
+        /// @brief A `Float` literal value
+        double fval;
 
         /// @variation `identifier`
         /// @brief An identifier token value
@@ -362,13 +410,40 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         }
 
         if (is_digit(*p)) {
-            int64_t val = 0;
+            int64_t ival = 0;
             while (is_digit(*p)) {
-                val = val * 10 + (*p - '0');
+                ival = ival * 10 + (*p - '0');
                 p++;
             }
-            token_t t = {.tag = TOK_INT, .value.ival = val};
+            if (*p == '.' && is_digit(*(p + 1))) {
+                p++;
+                double fval = (double)ival;
+                double frac = 0.1;
+                while (is_digit(*p)) {
+                    fval += frac * (*p - '0');
+                    frac *= 0.1;
+                    p++;
+                }
+                token_t t = {.tag = TOK_FLOAT, .value.fval = fval};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+            } else {
+                token_t t = {.tag = TOK_INT, .value.ival = ival};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+            }
+            continue;
+        }
+
+        if (strncmp(p, "true", 4) == 0 && !isalnum(p[4])) {
+            token_t t = {.tag = TOK_TRUE};
             clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 4;
+            continue;
+        }
+
+        if (strncmp(p, "false", 5) == 0 && !isalnum(p[5])) {
+            token_t t = {.tag = TOK_FALSE};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 5;
             continue;
         }
 
@@ -388,9 +463,50 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         }
 
         if (*p == '=') {
-            token_t t = {.tag = TOK_EQ};
-            clape_arr_append(sizeof(token_t), &tokens, &t);
-            p++;
+            if (*(p + 1) == '=') {
+                token_t t = {.tag = TOK_EQ_EQ};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+                p += 2;
+            } else {
+                token_t t = {.tag = TOK_EQ};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+                p++;
+            }
+            continue;
+        }
+        if (*p == '<') {
+            if (*(p + 1) == '=') {
+                token_t t = {.tag = TOK_LE};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+                p += 2;
+            } else {
+                token_t t = {.tag = TOK_LT};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+                p++;
+            }
+            continue;
+        }
+        if (*p == '>') {
+            if (*(p + 1) == '=') {
+                token_t t = {.tag = TOK_GE};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+                p += 2;
+            } else {
+                token_t t = {.tag = TOK_GT};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+                p++;
+            }
+            continue;
+        }
+        if (*p == '!') {
+            if (*(p + 1) == '=') {
+                token_t t = {.tag = TOK_NE};
+                clape_arr_append(sizeof(token_t), &tokens, &t);
+                p += 2;
+            } else {
+                fprintf(stderr, "Expected '=' after '!'\n");
+                return NULL;
+            }
             continue;
         }
         if (*p == '+') {
@@ -434,9 +550,6 @@ clape_arr_t *clape_tokenize(char *const file_content) {
 
 void clape_print_token(FILE *const stream, token_t *const token) {
     switch (token->tag) {
-        case TOK_EQ:
-            fprintf(stream, "=");
-            break;
         case TOK_PLUS:
             fprintf(stream, "+");
             break;
@@ -449,14 +562,44 @@ void clape_print_token(FILE *const stream, token_t *const token) {
         case TOK_DIV:
             fprintf(stream, "/");
             break;
+        case TOK_EQ:
+            fprintf(stream, "=");
+            break;
+        case TOK_EQ_EQ:
+            fprintf(stream, "==");
+            break;
+        case TOK_NE:
+            fprintf(stream, "!=");
+            break;
+        case TOK_LT:
+            fprintf(stream, "<");
+            break;
+        case TOK_LE:
+            fprintf(stream, "<=");
+            break;
+        case TOK_GT:
+            fprintf(stream, ">");
+            break;
+        case TOK_GE:
+            fprintf(stream, ">=");
+            break;
         case TOK_LET:
             fprintf(stream, "let");
             break;
         case TOK_USE:
             fprintf(stream, "use");
             break;
+        case TOK_TRUE:
+            fprintf(stream, "true");
+            break;
+        case TOK_FALSE:
+            fprintf(stream, "false");
+            break;
         case TOK_INT:
             fprintf(stream, "%li", token->value.ival);
+            break;
+        case TOK_FLOAT:
+            fprintf(stream, "%g", token->value.fval);
             break;
         case TOK_IDENTIFIER:
             fprintf(stream, "%s", token->value.identifier);
@@ -471,14 +614,23 @@ void clape_free_tokens(clape_arr_t *const tokens) {
     for (size_t i = 0; i < tokens->len; i++) {
         token_t *tok = ACCESS_ARR_AT(token_t, tokens, i);
         switch (tok->tag) {
-            case TOK_EQ:
             case TOK_PLUS:
             case TOK_MINUS:
             case TOK_MUL:
             case TOK_DIV:
+            case TOK_EQ:
+            case TOK_EQ_EQ:
+            case TOK_NE:
+            case TOK_LT:
+            case TOK_LE:
+            case TOK_GT:
+            case TOK_GE:
             case TOK_LET:
             case TOK_USE:
+            case TOK_TRUE:
+            case TOK_FALSE:
             case TOK_INT:
+            case TOK_FLOAT:
                 break;
             case TOK_IDENTIFIER:
                 free(tok->value.identifier);
@@ -523,6 +675,7 @@ char *strdup(const char *s);
 
 typedef enum {
     CLAPE_BINDING_POWER_DEFAULT,
+    CLAPE_BINDING_POWER_RELATIONAL,
     CLAPE_BINDING_POWER_TERM,
     CLAPE_BINDING_POWER_FACTOR,
     CLAPE_BINDING_POWER_CALL,
@@ -549,6 +702,13 @@ static clape_binding_power_t clape_infix_bp(token_type_e tag) {
         case TOK_MUL:
         case TOK_DIV:
             return CLAPE_BINDING_POWER_FACTOR;
+        case TOK_EQ_EQ:
+        case TOK_NE:
+        case TOK_LT:
+        case TOK_LE:
+        case TOK_GT:
+        case TOK_GE:
+            return CLAPE_BINDING_POWER_RELATIONAL;
         default:
             return CLAPE_BINDING_POWER_DEFAULT;
     }
@@ -562,7 +722,41 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
         case TOK_INT:
             lhs = (clape_expr_t){
                 .tag = CLAPE_EXPR_LIT,
-                .value.lit = (clape_value_t){.tag = CLAPE_VAL_INT, .value.ival = tok->value.ival},
+                .value.lit =
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_INT},
+                        .value.ival = tok->value.ival,
+                    },
+            };
+            break;
+        case TOK_FLOAT:
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_LIT,
+                .value.lit =
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_FLOAT},
+                        .value.fval = tok->value.fval,
+                    },
+            };
+            break;
+        case TOK_TRUE:
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_LIT,
+                .value.lit =
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = true,
+                    },
+            };
+            break;
+        case TOK_FALSE:
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_LIT,
+                .value.lit =
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = false,
+                    },
             };
             break;
         case TOK_IDENTIFIER:
@@ -602,6 +796,30 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                     op = CLAPE_BINOP_DIV;
                     cur_bp = CLAPE_BINDING_POWER_FACTOR;
                     break;
+                case TOK_EQ_EQ:
+                    op = CLAPE_BINOP_EQ;
+                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                    break;
+                case TOK_NE:
+                    op = CLAPE_BINOP_NE;
+                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                    break;
+                case TOK_LT:
+                    op = CLAPE_BINOP_LT;
+                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                    break;
+                case TOK_LE:
+                    op = CLAPE_BINOP_LE;
+                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                    break;
+                case TOK_GT:
+                    op = CLAPE_BINOP_GT;
+                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                    break;
+                case TOK_GE:
+                    op = CLAPE_BINOP_GE;
+                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                    break;
                 default:
                     fprintf(stderr, "Unexpected infix operator\n");
                     exit(1);
@@ -615,7 +833,8 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                 .tag = CLAPE_EXPR_BINOP,
                 .value.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
             };
-        } else if ((next == TOK_INT || next == TOK_IDENTIFIER) &&
+        } else if ((next == TOK_INT || next == TOK_FLOAT || next == TOK_TRUE || next == TOK_FALSE ||
+                       next == TOK_IDENTIFIER) &&
             CLAPE_BINDING_POWER_CALL > min_bp) {
             cur_bp = CLAPE_BINDING_POWER_CALL;
             clape_expr_t arg = clape_parse_expr(p, cur_bp);
@@ -639,14 +858,14 @@ static clape_stmt_t clape_parse_stmt(clape_parser_t *p) {
     if (first->tag == TOK_USE) {
         token_t *mod_tok = clape_advance(p);
         return (clape_stmt_t){
-            .tag = STMT_USE,
+            .tag = CLAPE_STMT_USE,
             .value.use = {.module = strdup(mod_tok->value.identifier)},
         };
     }
     token_t *name_tok = clape_advance(p);
     clape_advance(p);
     clape_stmt_t stmt = {
-        .tag = STMT_LET,
+        .tag = CLAPE_STMT_LET,
         .value.let =
             {
                 .name = strdup(name_tok->value.identifier),
@@ -676,7 +895,20 @@ bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
 static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
     switch (expr->tag) {
         case CLAPE_EXPR_LIT:
-            fprintf(stream, "%li", expr->value.lit.value.ival);
+            switch (expr->value.lit.type.tag) {
+                case CLAPE_TYPE_INT:
+                    fprintf(stream, "%li", expr->value.lit.value.ival);
+                    break;
+                case CLAPE_TYPE_FLOAT:
+                    fprintf(stream, "%g", expr->value.lit.value.fval);
+                    break;
+                case CLAPE_TYPE_BOOL:
+                    fprintf(stream, "%s", expr->value.lit.value.bval ? "true" : "false");
+                    break;
+                default:
+                    fprintf(stream, "<value>");
+                    break;
+            }
             break;
         case CLAPE_EXPR_IDENT:
             fprintf(stream, "%s", expr->value.ident);
@@ -695,6 +927,24 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
                     break;
                 case CLAPE_BINOP_DIV:
                     op_str = "/";
+                    break;
+                case CLAPE_BINOP_EQ:
+                    op_str = "==";
+                    break;
+                case CLAPE_BINOP_NE:
+                    op_str = "!=";
+                    break;
+                case CLAPE_BINOP_LT:
+                    op_str = "<";
+                    break;
+                case CLAPE_BINOP_LE:
+                    op_str = "<=";
+                    break;
+                case CLAPE_BINOP_GT:
+                    op_str = ">";
+                    break;
+                case CLAPE_BINOP_GE:
+                    op_str = ">=";
                     break;
             }
             fprintf(stream, "(");
@@ -717,7 +967,7 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
 void clape_print_program(clape_program_t *const program) {
     for (size_t i = 0; i < program->statements->len; i++) {
         clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
-        if (stmt->tag == STMT_LET) {
+        if (stmt->tag == CLAPE_STMT_LET) {
             fprintf(stdout, "(let %s = ", stmt->value.let.name);
             clape_print_expr(stdout, &stmt->value.let.expr);
             fprintf(stdout, ")\n");
@@ -755,7 +1005,7 @@ void clape_free_program(clape_program_t *const program) {
     }
     for (size_t i = 0; i < program->statements->len; i++) {
         clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
-        if (stmt->tag == STMT_LET) {
+        if (stmt->tag == CLAPE_STMT_LET) {
             free(stmt->value.let.name);
             clape_free_expr(&stmt->value.let.expr);
         } else {
@@ -793,31 +1043,172 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
         case CLAPE_EXPR_BINOP: {
             clape_value_t lhs = clape_eval(expr->value.binop.lhs, env);
             clape_value_t rhs = clape_eval(expr->value.binop.rhs, env);
-            if (lhs.tag != CLAPE_VAL_INT || rhs.tag != CLAPE_VAL_INT) {
-                fprintf(stderr, "Binary operations require integers\n");
+            if (lhs.type.tag != rhs.type.tag) {
+                fprintf(stderr, "Type mismatch in binary operation\n");
                 exit(1);
             }
-            int64_t result;
-            switch (expr->value.binop.op) {
+
+            clape_binop_e op = expr->value.binop.op;
+            switch (op) {
                 case CLAPE_BINOP_ADD:
-                    result = lhs.value.ival + rhs.value.ival;
-                    break;
                 case CLAPE_BINOP_SUB:
-                    result = lhs.value.ival - rhs.value.ival;
-                    break;
                 case CLAPE_BINOP_MUL:
-                    result = lhs.value.ival * rhs.value.ival;
-                    break;
                 case CLAPE_BINOP_DIV:
-                    result = lhs.value.ival / rhs.value.ival;
-                    break;
+                    if (lhs.type.tag != rhs.type.tag) {
+                        fprintf(stderr, "Type mismatch in arithmetic: cannot mix types\n");
+                        exit(1);
+                    }
+                    switch (lhs.type.tag) {
+                        default:
+                            fprintf(stderr, "Arithmetic requires Int or Float\n");
+                            exit(1);
+                        case CLAPE_TYPE_INT: {
+                            int64_t r;
+                            switch (op) {
+                                case CLAPE_BINOP_ADD:
+                                    r = lhs.value.ival + rhs.value.ival;
+                                    break;
+                                case CLAPE_BINOP_SUB:
+                                    r = lhs.value.ival - rhs.value.ival;
+                                    break;
+                                case CLAPE_BINOP_MUL:
+                                    r = lhs.value.ival * rhs.value.ival;
+                                    break;
+                                case CLAPE_BINOP_DIV:
+                                    r = lhs.value.ival / rhs.value.ival;
+                                    break;
+                                default:
+                                    exit(1);
+                            }
+                            return (clape_value_t){
+                                .type = {.tag = CLAPE_TYPE_INT},
+                                .value.ival = r,
+                            };
+                        }
+                        case CLAPE_TYPE_FLOAT: {
+                            double r;
+                            switch (op) {
+                                case CLAPE_BINOP_ADD:
+                                    r = lhs.value.fval + rhs.value.fval;
+                                    break;
+                                case CLAPE_BINOP_SUB:
+                                    r = lhs.value.fval - rhs.value.fval;
+                                    break;
+                                case CLAPE_BINOP_MUL:
+                                    r = lhs.value.fval * rhs.value.fval;
+                                    break;
+                                case CLAPE_BINOP_DIV:
+                                    r = lhs.value.fval / rhs.value.fval;
+                                    break;
+                                default:
+                                    exit(1);
+                            }
+                            return (clape_value_t){
+                                .type = {.tag = CLAPE_TYPE_FLOAT},
+                                .value.fval = r,
+                            };
+                        }
+                    }
+                case CLAPE_BINOP_LT: {
+                    bool result = false;
+                    if (lhs.type.tag == CLAPE_TYPE_INT)
+                        result = lhs.value.ival < rhs.value.ival;
+                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
+                        result = lhs.value.fval < rhs.value.fval;
+                    else {
+                        fprintf(stderr, "Comparison requires Int or Float\n");
+                        exit(1);
+                    }
+                    return (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = result,
+                    };
+                }
+                case CLAPE_BINOP_GT: {
+                    bool result = false;
+                    if (lhs.type.tag == CLAPE_TYPE_INT)
+                        result = lhs.value.ival > rhs.value.ival;
+                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
+                        result = lhs.value.fval > rhs.value.fval;
+                    else {
+                        fprintf(stderr, "Comparison requires Int or Float\n");
+                        exit(1);
+                    }
+                    return (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = result,
+                    };
+                }
+                case CLAPE_BINOP_LE: {
+                    bool result = false;
+                    if (lhs.type.tag == CLAPE_TYPE_INT)
+                        result = lhs.value.ival <= rhs.value.ival;
+                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
+                        result = lhs.value.fval <= rhs.value.fval;
+                    else {
+                        fprintf(stderr, "Comparison requires Int or Float\n");
+                        exit(1);
+                    }
+                    return (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = result,
+                    };
+                }
+                case CLAPE_BINOP_GE: {
+                    bool result = false;
+                    if (lhs.type.tag == CLAPE_TYPE_INT)
+                        result = lhs.value.ival >= rhs.value.ival;
+                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
+                        result = lhs.value.fval >= rhs.value.fval;
+                    else {
+                        fprintf(stderr, "Comparison requires Int or Float\n");
+                        exit(1);
+                    }
+                    return (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = result,
+                    };
+                }
+                case CLAPE_BINOP_EQ: {
+                    bool result = false;
+                    if (lhs.type.tag == CLAPE_TYPE_INT)
+                        result = lhs.value.ival == rhs.value.ival;
+                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
+                        result = lhs.value.fval == rhs.value.fval;
+                    else if (lhs.type.tag == CLAPE_TYPE_BOOL)
+                        result = lhs.value.bval == rhs.value.bval;
+                    else {
+                        fprintf(stderr, "Equality not supported for this type\n");
+                        exit(1);
+                    }
+                    return (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = result,
+                    };
+                }
+                case CLAPE_BINOP_NE: {
+                    bool result = false;
+                    if (lhs.type.tag == CLAPE_TYPE_INT)
+                        result = lhs.value.ival != rhs.value.ival;
+                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
+                        result = lhs.value.fval != rhs.value.fval;
+                    else if (lhs.type.tag == CLAPE_TYPE_BOOL)
+                        result = lhs.value.bval != rhs.value.bval;
+                    else {
+                        fprintf(stderr, "Inequality not supported for this type\n");
+                        exit(1);
+                    }
+                    return (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = result,
+                    };
+                }
             }
-            return (clape_value_t){.tag = CLAPE_VAL_INT, .value.ival = result};
         }
         case CLAPE_EXPR_CALL: {
             clape_value_t callee = clape_eval(expr->value.call.callee, env);
             clape_value_t arg = clape_eval(expr->value.call.arg, env);
-            if (callee.tag != CLAPE_VAL_FUNC) {
+            if (callee.type.tag != CLAPE_TYPE_FUNC) {
                 fprintf(stderr, "Attempted to call a non-function value\n");
                 exit(1);
             }
@@ -827,18 +1218,24 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
 }
 
 static clape_value_t clape_builtin_print(clape_value_t arg) {
-    switch (arg.tag) {
-        case CLAPE_VAL_INT:
+    switch (arg.type.tag) {
+        case CLAPE_TYPE_INT:
             printf("%li\n", arg.value.ival);
             break;
-        case CLAPE_VAL_UNIT:
+        case CLAPE_TYPE_FLOAT:
+            printf("%g\n", arg.value.fval);
+            break;
+        case CLAPE_TYPE_BOOL:
+            printf("%s\n", arg.value.bval ? "true" : "false");
+            break;
+        case CLAPE_TYPE_UNIT:
             printf("Unit\n");
             break;
-        case CLAPE_VAL_FUNC:
+        case CLAPE_TYPE_FUNC:
             printf("<function>\n");
             break;
     }
-    return (clape_value_t){.tag = CLAPE_VAL_UNIT};
+    return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
 
 static void clape_env_free(clape_env_t *env) {
@@ -856,11 +1253,13 @@ void clape_interpret(clape_program_t *const program) {
     for (size_t i = 0; i < program->statements->len; i++) {
         clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
 
-        if (stmt->tag == STMT_LET) {
-            clape_value_t val = clape_eval(&stmt->value.let.expr, env);
-            if (strcmp(stmt->value.let.name, "_") == 0) {
-                // Discard result for side-effect calls
-            } else {
+        switch (stmt->tag) {
+            case CLAPE_STMT_LET: {
+                clape_value_t val = clape_eval(&stmt->value.let.expr, env);
+                if (strcmp(stmt->value.let.name, "_") == 0) {
+                    // Discard result for side-effect calls
+                    break;
+                }
                 clape_env_t *binding = malloc(sizeof(clape_env_t));
                 *binding = (clape_env_t){
                     .name = strdup(stmt->value.let.name),
@@ -868,20 +1267,26 @@ void clape_interpret(clape_program_t *const program) {
                     .next = env,
                 };
                 env = binding;
+                break;
             }
-        } else {
-            if (strcmp(stmt->value.use.module, "Print") == 0) {
+            case CLAPE_STMT_USE: {
+                // Use statement
+                if (strcmp(stmt->value.use.module, "Print") != 0) {
+                    fprintf(stderr, "Unknown module: %s\n", stmt->value.use.module);
+                    exit(1);
+                }
                 clape_env_t *binding = malloc(sizeof(clape_env_t));
                 *binding = (clape_env_t){
                     .name = strdup("print"),
                     .value =
-                        (clape_value_t){.tag = CLAPE_VAL_FUNC, .value.fn = clape_builtin_print},
+                        (clape_value_t){
+                            .type = {.tag = CLAPE_TYPE_FUNC},
+                            .value.fn = clape_builtin_print,
+                        },
                     .next = env,
                 };
                 env = binding;
-            } else {
-                fprintf(stderr, "Unknown module: %s\n", stmt->value.use.module);
-                exit(1);
+                break;
             }
         }
     }
