@@ -661,7 +661,7 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         if (*p == '-') {
             token_t t = {.tag = *(p + 1) == '>' ? TOK_ARROW : TOK_MINUS};
             clape_arr_append(sizeof(token_t), &tokens, &t);
-            p++;
+            p += t.tag == TOK_ARROW ? 2 : 1;
             continue;
         }
         if (*p == '*') {
