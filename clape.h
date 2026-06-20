@@ -1089,6 +1089,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                     fprintf(stderr, "Expected ')'\n");
                     exit(1);
                 }
+                break;
             }
 
             clape_arr_t *params = clape_arr_create(sizeof(clape_param_t), 0);
@@ -1761,6 +1762,7 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             };
         }
     }
+    return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
 
 static clape_value_t clape_builtin_print(clape_value_t arg) {
