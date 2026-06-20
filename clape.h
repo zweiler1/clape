@@ -700,6 +700,14 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             p++;
             continue;
         }
+        if (*p == '#') {
+            // Single-line comment: skip until \n or \0
+            while (*p && *p != '\n') {
+                p++;
+            }
+            continue;
+        }
+
         if (*p == ':') {
             token_t t = {.tag = TOK_COLON};
             clape_arr_append(sizeof(token_t), &tokens, &t);

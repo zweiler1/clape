@@ -31,3 +31,9 @@ let _ = print (x + y)
 let _ = print (1 < 2 and 3 > 1)
 let _ = print (not false)
 let _ = print (45 + 55)
+
+# let fib = (n: Int) -> Int {
+#     n if n < 2 else {
+#         fib (n - 1) + fib (n - 2)
+#     }
+# }
