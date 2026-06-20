@@ -172,13 +172,22 @@ typedef enum {
     CLAPE_BINOP_GE,
     CLAPE_BINOP_EQ,
     CLAPE_BINOP_NE,
+    CLAPE_BINOP_AND,
+    CLAPE_BINOP_OR,
 } clape_binop_e;
+
+/// @enum `clape_unop_e`
+/// @brief The enum for unary operator types
+typedef enum {
+    CLAPE_UNOP_NOT,
+} clape_unop_e;
 
 /// @enum `clape_expr_e`
 /// @brief The enum to tag the clape expr with
 typedef enum {
     CLAPE_EXPR_LIT,
     CLAPE_EXPR_IDENT,
+    CLAPE_EXPR_UNARY,
     CLAPE_EXPR_BINOP,
     CLAPE_EXPR_CALL,
 } clape_expr_e;
@@ -200,6 +209,13 @@ typedef struct clape_expr_t {
         /// @variation `ident`
         /// @brief An identifier reference
         char *ident;
+
+        /// @variation `unary`
+        /// @brief A unary operation expression
+        struct {
+            clape_unop_e op;
+            struct clape_expr_t *operand;
+        } unary;
 
         /// @variation `binop`
         /// @brief A binary operation expression
@@ -293,6 +309,9 @@ typedef enum : uint8_t {
     // Keywords
     TOK_LET,
     TOK_USE,
+    TOK_AND,
+    TOK_OR,
+    TOK_NOT,
     // Literals
     TOK_TRUE,
     TOK_FALSE,
@@ -300,6 +319,8 @@ typedef enum : uint8_t {
     TOK_FLOAT,
     // Other
     TOK_IDENTIFIER,
+    TOK_LPAREN,
+    TOK_RPAREN,
     TOK_EOF,
 } token_type_e;
 
@@ -447,6 +468,27 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             continue;
         }
 
+        if (strncmp(p, "and", 3) == 0 && !isalnum(p[3])) {
+            token_t t = {.tag = TOK_AND};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 3;
+            continue;
+        }
+
+        if (strncmp(p, "or", 2) == 0 && !isalnum(p[2])) {
+            token_t t = {.tag = TOK_OR};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 2;
+            continue;
+        }
+
+        if (strncmp(p, "not", 3) == 0 && !isalnum(p[3])) {
+            token_t t = {.tag = TOK_NOT};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 3;
+            continue;
+        }
+
         if (isalpha(*p) || *p == '_') {
             char *start = p;
             while (isalnum(*p) || *p == '_') {
@@ -533,6 +575,18 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             p++;
             continue;
         }
+        if (*p == '(') {
+            token_t t = {.tag = TOK_LPAREN};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
+        if (*p == ')') {
+            token_t t = {.tag = TOK_RPAREN};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
 
         // Unknown character → error (for now just skip or handle later)
         fprintf(stderr, "Unknown character: '%c'\n", *p);
@@ -589,6 +643,15 @@ void clape_print_token(FILE *const stream, token_t *const token) {
         case TOK_USE:
             fprintf(stream, "use");
             break;
+        case TOK_AND:
+            fprintf(stream, "and");
+            break;
+        case TOK_OR:
+            fprintf(stream, "or");
+            break;
+        case TOK_NOT:
+            fprintf(stream, "not");
+            break;
         case TOK_TRUE:
             fprintf(stream, "true");
             break;
@@ -600,6 +663,12 @@ void clape_print_token(FILE *const stream, token_t *const token) {
             break;
         case TOK_FLOAT:
             fprintf(stream, "%g", token->value.fval);
+            break;
+        case TOK_LPAREN:
+            fprintf(stream, "(");
+            break;
+        case TOK_RPAREN:
+            fprintf(stream, ")");
             break;
         case TOK_IDENTIFIER:
             fprintf(stream, "%s", token->value.identifier);
@@ -627,10 +696,15 @@ void clape_free_tokens(clape_arr_t *const tokens) {
             case TOK_GE:
             case TOK_LET:
             case TOK_USE:
+            case TOK_AND:
+            case TOK_OR:
+            case TOK_NOT:
             case TOK_TRUE:
             case TOK_FALSE:
             case TOK_INT:
             case TOK_FLOAT:
+            case TOK_LPAREN:
+            case TOK_RPAREN:
                 break;
             case TOK_IDENTIFIER:
                 free(tok->value.identifier);
@@ -675,6 +749,7 @@ char *strdup(const char *s);
 
 typedef enum {
     CLAPE_BINDING_POWER_DEFAULT,
+    CLAPE_BINDING_POWER_LOGICAL,
     CLAPE_BINDING_POWER_RELATIONAL,
     CLAPE_BINDING_POWER_TERM,
     CLAPE_BINDING_POWER_FACTOR,
@@ -702,6 +777,9 @@ static clape_binding_power_t clape_infix_bp(token_type_e tag) {
         case TOK_MUL:
         case TOK_DIV:
             return CLAPE_BINDING_POWER_FACTOR;
+        case TOK_AND:
+        case TOK_OR:
+            return CLAPE_BINDING_POWER_LOGICAL;
         case TOK_EQ_EQ:
         case TOK_NE:
         case TOK_LT:
@@ -759,6 +837,24 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                     },
             };
             break;
+        case TOK_NOT: {
+            clape_expr_t *op = malloc(sizeof(clape_expr_t));
+            *op = clape_parse_expr(p, CLAPE_BINDING_POWER_CALL);
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_UNARY,
+                .value.unary = {.op = CLAPE_UNOP_NOT, .operand = op},
+            };
+            break;
+        }
+        case TOK_LPAREN: {
+            lhs = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+            tok = clape_advance(p);
+            if (tok->tag != TOK_RPAREN) {
+                fprintf(stderr, "Expected ')'\n");
+                exit(1);
+            }
+            break;
+        }
         case TOK_IDENTIFIER:
             lhs = (clape_expr_t){
                 .tag = CLAPE_EXPR_IDENT,
@@ -820,6 +916,14 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                     op = CLAPE_BINOP_GE;
                     cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
                     break;
+                case TOK_AND:
+                    op = CLAPE_BINOP_AND;
+                    cur_bp = CLAPE_BINDING_POWER_LOGICAL;
+                    break;
+                case TOK_OR:
+                    op = CLAPE_BINOP_OR;
+                    cur_bp = CLAPE_BINDING_POWER_LOGICAL;
+                    break;
                 default:
                     fprintf(stderr, "Unexpected infix operator\n");
                     exit(1);
@@ -834,7 +938,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                 .value.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
             };
         } else if ((next == TOK_INT || next == TOK_FLOAT || next == TOK_TRUE || next == TOK_FALSE ||
-                       next == TOK_IDENTIFIER) &&
+                       next == TOK_NOT || next == TOK_LPAREN || next == TOK_IDENTIFIER) &&
             CLAPE_BINDING_POWER_CALL > min_bp) {
             cur_bp = CLAPE_BINDING_POWER_CALL;
             clape_expr_t arg = clape_parse_expr(p, cur_bp);
@@ -910,6 +1014,11 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
                     break;
             }
             break;
+        case CLAPE_EXPR_UNARY:
+            fprintf(stream, "(not ");
+            clape_print_expr(stream, expr->value.unary.operand);
+            fprintf(stream, ")");
+            break;
         case CLAPE_EXPR_IDENT:
             fprintf(stream, "%s", expr->value.ident);
             break;
@@ -945,6 +1054,12 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
                     break;
                 case CLAPE_BINOP_GE:
                     op_str = ">=";
+                    break;
+                case CLAPE_BINOP_AND:
+                    op_str = "and";
+                    break;
+                case CLAPE_BINOP_OR:
+                    op_str = "or";
                     break;
             }
             fprintf(stream, "(");
@@ -983,6 +1098,10 @@ static void clape_free_expr(clape_expr_t *expr) {
             break;
         case CLAPE_EXPR_IDENT:
             free(expr->value.ident);
+            break;
+        case CLAPE_EXPR_UNARY:
+            clape_free_expr(expr->value.unary.operand);
+            free(expr->value.unary.operand);
             break;
         case CLAPE_EXPR_BINOP:
             clape_free_expr(expr->value.binop.lhs);
@@ -1040,6 +1159,17 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             fprintf(stderr, "Undefined variable: %s\n", expr->value.ident);
             exit(1);
         }
+        case CLAPE_EXPR_UNARY: {
+            clape_value_t operand = clape_eval(expr->value.unary.operand, env);
+            if (operand.type.tag != CLAPE_TYPE_BOOL) {
+                fprintf(stderr, "not requires a Bool operand\n");
+                exit(1);
+            }
+            return (clape_value_t){
+                .type = {.tag = CLAPE_TYPE_BOOL},
+                .value.bval = !operand.value.bval,
+            };
+        }
         case CLAPE_EXPR_BINOP: {
             clape_value_t lhs = clape_eval(expr->value.binop.lhs, env);
             clape_value_t rhs = clape_eval(expr->value.binop.rhs, env);
@@ -1050,6 +1180,17 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
 
             clape_binop_e op = expr->value.binop.op;
             switch (op) {
+                case CLAPE_BINOP_AND:
+                case CLAPE_BINOP_OR:
+                    if (lhs.type.tag != CLAPE_TYPE_BOOL || rhs.type.tag != CLAPE_TYPE_BOOL) {
+                        fprintf(stderr, "and/or require Bool operands\n");
+                        exit(1);
+                    }
+                    return (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_BOOL},
+                        .value.bval = (op == CLAPE_BINOP_AND) ? (lhs.value.bval && rhs.value.bval)
+                                                              : (lhs.value.bval || rhs.value.bval),
+                    };
                 case CLAPE_BINOP_ADD:
                 case CLAPE_BINOP_SUB:
                 case CLAPE_BINOP_MUL:

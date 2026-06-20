@@ -16,3 +16,10 @@ let _ = print eq
 
 let ne = 42 != 42
 let _ = print ne
+
+let _ = print (ne or eq)
+let _ = print (true or false)
+let _ = print (false and false)
+let _ = print (false == false)
+let _ = print (true and true)
+let _ = print (not false or false)
