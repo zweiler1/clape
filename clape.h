@@ -203,6 +203,7 @@ typedef enum {
     CLAPE_EXPR_BINOP,
     CLAPE_EXPR_CALL,
     CLAPE_EXPR_LAMBDA,
+    CLAPE_EXPR_IF,
     CLAPE_EXPR_BLOCK,
 } clape_expr_e;
 
@@ -256,6 +257,14 @@ typedef struct clape_expr_t {
             clape_type_t return_type;
             struct clape_expr_t *body;
         } lambda;
+
+        /// @variation `if_`
+        /// @brief An if-then-else ternary expression: then_expr if cond_expr else else_expr
+        struct {
+            struct clape_expr_t *condition;
+            struct clape_expr_t *then_branch;
+            struct clape_expr_t *else_branch;
+        } if_;
 
         /// @variation `block`
         /// @brief A block expression: { stmts; return_expr }
@@ -377,6 +386,8 @@ typedef enum : uint8_t {
     TOK_AND,
     TOK_OR,
     TOK_NOT,
+    TOK_IF,
+    TOK_ELSE,
     // Literals
     TOK_TRUE,
     TOK_FALSE,
@@ -562,6 +573,20 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             token_t t = {.tag = TOK_NOT};
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 3;
+            continue;
+        }
+
+        if (strncmp(p, "if", 2) == 0 && !isalnum(p[2])) {
+            token_t t = {.tag = TOK_IF};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 2;
+            continue;
+        }
+
+        if (strncmp(p, "else", 4) == 0 && !isalnum(p[4])) {
+            token_t t = {.tag = TOK_ELSE};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 4;
             continue;
         }
 
@@ -791,6 +816,12 @@ void clape_print_token(FILE *const stream, token_t *const token) {
         case TOK_NOT:
             fprintf(stream, "not");
             break;
+        case TOK_IF:
+            fprintf(stream, "if");
+            break;
+        case TOK_ELSE:
+            fprintf(stream, "else");
+            break;
         case TOK_TRUE:
             fprintf(stream, "true");
             break;
@@ -868,6 +899,8 @@ void clape_free_tokens(clape_arr_t *const tokens) {
             case TOK_AND:
             case TOK_OR:
             case TOK_NOT:
+            case TOK_IF:
+            case TOK_ELSE:
             case TOK_TRUE:
             case TOK_FALSE:
             case TOK_INT:
@@ -928,6 +961,7 @@ char *strdup(const char *s);
 
 typedef enum {
     CLAPE_BINDING_POWER_DEFAULT,
+    CLAPE_BINDING_POWER_IF,
     CLAPE_BINDING_POWER_LOGICAL,
     CLAPE_BINDING_POWER_RELATIONAL,
     CLAPE_BINDING_POWER_TERM,
@@ -950,6 +984,7 @@ static token_t *clape_advance(clape_parser_t *p) {
 
 static clape_stmt_t clape_parse_stmt(clape_parser_t *p);
 static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t min_bp);
+static clape_expr_t clape_parse_block_body(clape_parser_t *p);
 static clape_expr_t clape_parse_block(clape_parser_t *p);
 
 static clape_type_t clape_parse_type(clape_parser_t *p) {
@@ -1131,7 +1166,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             break;
         }
         case TOK_LBRACE:
-            lhs = clape_parse_block(p);
+            lhs = clape_parse_block_body(p);
             break;
         case TOK_IDENTIFIER:
             lhs = (clape_expr_t){
@@ -1148,6 +1183,31 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
 
     while (true) {
         token_type_e next = clape_peek(p)->tag;
+
+        if (next == TOK_IF && CLAPE_BINDING_POWER_IF > min_bp) {
+            clape_expr_t *then_ptr = malloc(sizeof(clape_expr_t));
+            *then_ptr = lhs;
+            clape_advance(p);
+            clape_expr_t cond = clape_parse_expr(p, CLAPE_BINDING_POWER_IF);
+            token_t *else_tok = clape_advance(p);
+            if (else_tok->tag != TOK_ELSE) {
+                fprintf(stderr, "Expected 'else' after if condition\n");
+                exit(1);
+            }
+            clape_expr_t else_branch = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+            clape_expr_t *cond_ptr = malloc(sizeof(clape_expr_t));
+            *cond_ptr = cond;
+            clape_expr_t *else_ptr = malloc(sizeof(clape_expr_t));
+            *else_ptr = else_branch;
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_IF,
+                .value.if_ = {.condition = cond_ptr,
+                    .then_branch = then_ptr,
+                    .else_branch = else_ptr},
+            };
+            continue;
+        }
+
         clape_binding_power_t cur_bp = clape_infix_bp(next);
 
         if (cur_bp > min_bp) {
@@ -1258,12 +1318,7 @@ static clape_stmt_t clape_parse_stmt(clape_parser_t *p) {
     return stmt;
 }
 
-static clape_expr_t clape_parse_block(clape_parser_t *p) {
-    token_t *tok = clape_advance(p);
-    if (tok->tag != TOK_LBRACE) {
-        fprintf(stderr, "Expected '{'\n");
-        exit(1);
-    }
+static clape_expr_t clape_parse_block_body(clape_parser_t *p) {
     clape_arr_t *stmts = clape_arr_create(sizeof(clape_stmt_t), 0);
     while (clape_peek(p)->tag == TOK_LET) {
         clape_stmt_t stmt = clape_parse_stmt(p);
@@ -1277,7 +1332,7 @@ static clape_expr_t clape_parse_block(clape_parser_t *p) {
         ret_expr = malloc(sizeof(clape_expr_t));
         *ret_expr = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
     }
-    tok = clape_advance(p);
+    token_t *tok = clape_advance(p);
     if (tok->tag != TOK_RBRACE) {
         fprintf(stderr, "Expected '}'\n");
         exit(1);
@@ -1286,6 +1341,15 @@ static clape_expr_t clape_parse_block(clape_parser_t *p) {
         .tag = CLAPE_EXPR_BLOCK,
         .value.block = {.stmts = stmts, .return_expr = ret_expr},
     };
+}
+
+static clape_expr_t clape_parse_block(clape_parser_t *p) {
+    token_t *tok = clape_advance(p);
+    if (tok->tag != TOK_LBRACE) {
+        fprintf(stderr, "Expected '{'\n");
+        exit(1);
+    }
+    return clape_parse_block_body(p);
 }
 
 // ----- Public API -----
@@ -1391,6 +1455,15 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
         case CLAPE_EXPR_LAMBDA:
             fprintf(stream, "<lambda>");
             break;
+        case CLAPE_EXPR_IF:
+            fprintf(stream, "(");
+            clape_print_expr(stream, expr->value.if_.then_branch);
+            fprintf(stream, " if ");
+            clape_print_expr(stream, expr->value.if_.condition);
+            fprintf(stream, " else ");
+            clape_print_expr(stream, expr->value.if_.else_branch);
+            fprintf(stream, ")");
+            break;
         case CLAPE_EXPR_BLOCK:
             fprintf(stream, "<block>");
             break;
@@ -1440,6 +1513,14 @@ static void clape_free_expr(clape_expr_t *expr) {
             free(expr->value.lambda.params);
             clape_free_expr(expr->value.lambda.body);
             free(expr->value.lambda.body);
+            break;
+        case CLAPE_EXPR_IF:
+            clape_free_expr(expr->value.if_.condition);
+            free(expr->value.if_.condition);
+            clape_free_expr(expr->value.if_.then_branch);
+            free(expr->value.if_.then_branch);
+            clape_free_expr(expr->value.if_.else_branch);
+            free(expr->value.if_.else_branch);
             break;
         case CLAPE_EXPR_BLOCK:
             for (size_t i = 0; i < expr->value.block.stmts->len; i++) {
@@ -1494,7 +1575,12 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                     return e->value;
                 }
             }
-            fprintf(stderr, "Undefined variable: %s\n", expr->value.ident);
+            fprintf(stderr, "Undefined variable: %s in env={", expr->value.ident);
+            for (clape_env_t *e = env; e; e = e->next) {
+                fprintf(stderr, "%s%s%s", e == env ? "" : ", ", e->name,
+                    e->value.type.tag == CLAPE_TYPE_FUNC ? ":func" : "");
+            }
+            fprintf(stderr, "}\n");
             exit(1);
         }
         case CLAPE_EXPR_UNARY: {
@@ -1683,6 +1769,18 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                     };
                 }
             }
+            __builtin_unreachable();
+        }
+        case CLAPE_EXPR_IF: {
+            clape_value_t cond = clape_eval(expr->value.if_.condition, env);
+            if (cond.type.tag != CLAPE_TYPE_BOOL) {
+                fprintf(stderr, "if condition must be Bool\n");
+                exit(1);
+            }
+            if (cond.value.bval) {
+                return clape_eval(expr->value.if_.then_branch, env);
+            }
+            return clape_eval(expr->value.if_.else_branch, env);
         }
         case CLAPE_EXPR_LAMBDA: {
             clape_fn_t *fn = malloc(sizeof(clape_fn_t));
@@ -1818,6 +1916,17 @@ void clape_interpret(clape_program_t *const program) {
                     .next = env,
                 };
                 env = binding;
+                // Update closure to include this binding, enabling recursion.
+                // Prepend self-binding to preserve existing captured variables.
+                if (val.type.tag == CLAPE_TYPE_FUNC && !val.value.fn->is_builtin) {
+                    clape_env_t *self = malloc(sizeof(clape_env_t));
+                    *self = (clape_env_t){
+                        .name = strdup(stmt->value.let.name),
+                        .value = val,
+                        .next = val.value.fn->closure,
+                    };
+                    val.value.fn->closure = self;
+                }
                 break;
             }
             case CLAPE_STMT_USE: {
