@@ -127,6 +127,18 @@ typedef struct clape_type_t {
     } value;
 } clape_type_t;
 
+/// @struct `clape_param_t`
+/// @brief A single parameter declaration with a name and type
+typedef struct clape_param_t {
+    /// @var `name`
+    /// @brief The name of the function parameter
+    char *name;
+
+    /// @var `type`
+    /// @brief The type of the function parameter
+    clape_type_t type;
+} clape_param_t;
+
 /// Forward declaration for self-referencing function pointer
 typedef struct clape_value_t clape_value_t;
 typedef clape_value_t (*clape_builtin_fn)(clape_value_t);
@@ -154,8 +166,8 @@ struct clape_value_t {
         bool bval;
 
         /// @variation `fn`
-        /// @brief A builtin function pointer
-        clape_builtin_fn fn;
+        /// @brief A function descriptor (builtin or user-defined)
+        struct clape_fn_t *fn;
     } value;
 };
 
@@ -190,6 +202,8 @@ typedef enum {
     CLAPE_EXPR_UNARY,
     CLAPE_EXPR_BINOP,
     CLAPE_EXPR_CALL,
+    CLAPE_EXPR_LAMBDA,
+    CLAPE_EXPR_BLOCK,
 } clape_expr_e;
 
 /// @struct `clape_expr_t`
@@ -231,6 +245,24 @@ typedef struct clape_expr_t {
             struct clape_expr_t *callee;
             struct clape_expr_t *arg;
         } call;
+
+        /// @variation `lambda`
+        /// @brief A lambda expression: (params) -> RetType { body }
+        struct {
+            /// @var `params`
+            /// @brief An array of all paramters, where every value of the array is of type
+            /// `clape_param_t`
+            clape_arr_t *params;
+            clape_type_t return_type;
+            struct clape_expr_t *body;
+        } lambda;
+
+        /// @variation `block`
+        /// @brief A block expression: { stmts; return_expr }
+        struct {
+            clape_arr_t *stmts;
+            struct clape_expr_t *return_expr;
+        } block;
     } value;
 } clape_expr_t;
 
@@ -291,6 +323,39 @@ typedef struct clape_env_t {
     struct clape_env_t *next;
 } clape_env_t;
 
+/// @struct `clape_fn_t`
+/// @brief A function descriptor holding either a builtin or a user-defined function including
+/// partial application state
+typedef struct clape_fn_t {
+    /// @var `is_builtin`
+    /// @brief Whether this function is a builtin function, like the `print` function(s)
+    bool is_builtin;
+
+    /// @var `params`
+    /// @brief An array of all parameters, where every element is of type `clape_param_t`
+    clape_arr_t *params;
+
+    /// @var `return_type`
+    /// @brief The return type of the function
+    clape_type_t return_type;
+
+    /// @var `body`
+    /// @brief The body expression of the function
+    struct clape_expr_t *body;
+
+    /// @var `builtin_fn`
+    /// @brief The builtin function to call if this function is a builtin function
+    clape_builtin_fn builtin_fn;
+
+    /// @var `next_param_index`
+    /// @brief The index of the next parameter, for partially applied calls
+    size_t next_param_index;
+
+    /// @var `closure`
+    /// @brief The captured environment of this defined function, for closures
+    struct clape_env_t *closure;
+} clape_fn_t;
+
 /// @enum `token_type_e`
 /// @brief The enum of all possible Clape token types
 typedef enum : uint8_t {
@@ -321,6 +386,17 @@ typedef enum : uint8_t {
     TOK_IDENTIFIER,
     TOK_LPAREN,
     TOK_RPAREN,
+    TOK_LBRACE,
+    TOK_RBRACE,
+    TOK_COLON,
+    TOK_ARROW,
+    TOK_COMMA,
+    TOK_SEMICOLON,
+    // Type keywords
+    TOK_TYPE_INT,
+    TOK_TYPE_FLOAT,
+    TOK_TYPE_BOOL,
+    TOK_TYPE_UNIT,
     TOK_EOF,
 } token_type_e;
 
@@ -489,6 +565,31 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             continue;
         }
 
+        if (strncmp(p, "Int", 3) == 0 && !isalnum(p[3])) {
+            token_t t = {.tag = TOK_TYPE_INT};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 3;
+            continue;
+        }
+        if (strncmp(p, "Float", 5) == 0 && !isalnum(p[5])) {
+            token_t t = {.tag = TOK_TYPE_FLOAT};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 5;
+            continue;
+        }
+        if (strncmp(p, "Bool", 4) == 0 && !isalnum(p[4])) {
+            token_t t = {.tag = TOK_TYPE_BOOL};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 4;
+            continue;
+        }
+        if (strncmp(p, "Unit", 4) == 0 && !isalnum(p[4])) {
+            token_t t = {.tag = TOK_TYPE_UNIT};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p += 4;
+            continue;
+        }
+
         if (isalpha(*p) || *p == '_') {
             char *start = p;
             while (isalnum(*p) || *p == '_') {
@@ -558,7 +659,7 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             continue;
         }
         if (*p == '-') {
-            token_t t = {.tag = TOK_MINUS};
+            token_t t = {.tag = *(p + 1) == '>' ? TOK_ARROW : TOK_MINUS};
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
             continue;
@@ -583,6 +684,36 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         }
         if (*p == ')') {
             token_t t = {.tag = TOK_RPAREN};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
+        if (*p == '{') {
+            token_t t = {.tag = TOK_LBRACE};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
+        if (*p == '}') {
+            token_t t = {.tag = TOK_RBRACE};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
+        if (*p == ':') {
+            token_t t = {.tag = TOK_COLON};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
+        if (*p == ',') {
+            token_t t = {.tag = TOK_COMMA};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
+        if (*p == ';') {
+            token_t t = {.tag = TOK_SEMICOLON};
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
             continue;
@@ -670,6 +801,36 @@ void clape_print_token(FILE *const stream, token_t *const token) {
         case TOK_RPAREN:
             fprintf(stream, ")");
             break;
+        case TOK_LBRACE:
+            fprintf(stream, "{");
+            break;
+        case TOK_RBRACE:
+            fprintf(stream, "}");
+            break;
+        case TOK_COLON:
+            fprintf(stream, ":");
+            break;
+        case TOK_ARROW:
+            fprintf(stream, "->");
+            break;
+        case TOK_COMMA:
+            fprintf(stream, ",");
+            break;
+        case TOK_SEMICOLON:
+            fprintf(stream, ";");
+            break;
+        case TOK_TYPE_INT:
+            fprintf(stream, "Int");
+            break;
+        case TOK_TYPE_FLOAT:
+            fprintf(stream, "Float");
+            break;
+        case TOK_TYPE_BOOL:
+            fprintf(stream, "Bool");
+            break;
+        case TOK_TYPE_UNIT:
+            fprintf(stream, "Unit");
+            break;
         case TOK_IDENTIFIER:
             fprintf(stream, "%s", token->value.identifier);
             break;
@@ -705,6 +866,16 @@ void clape_free_tokens(clape_arr_t *const tokens) {
             case TOK_FLOAT:
             case TOK_LPAREN:
             case TOK_RPAREN:
+            case TOK_LBRACE:
+            case TOK_RBRACE:
+            case TOK_COLON:
+            case TOK_ARROW:
+            case TOK_COMMA:
+            case TOK_SEMICOLON:
+            case TOK_TYPE_INT:
+            case TOK_TYPE_FLOAT:
+            case TOK_TYPE_BOOL:
+            case TOK_TYPE_UNIT:
                 break;
             case TOK_IDENTIFIER:
                 free(tok->value.identifier);
@@ -767,6 +938,51 @@ static token_t *clape_peek(clape_parser_t *p) {
 
 static token_t *clape_advance(clape_parser_t *p) {
     return ACCESS_ARR_AT(token_t, p->tokens, p->pos++);
+}
+
+static clape_stmt_t clape_parse_stmt(clape_parser_t *p);
+static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t min_bp);
+static clape_expr_t clape_parse_block(clape_parser_t *p);
+
+static clape_type_t clape_parse_type(clape_parser_t *p) {
+    token_t *tok = clape_peek(p);
+    if (tok->tag == TOK_LPAREN) {
+        clape_advance(p);
+        clape_type_t param = clape_parse_type(p);
+        tok = clape_advance(p);
+        if (tok->tag != TOK_ARROW) {
+            fprintf(stderr, "Expected '->' in function type\n");
+            exit(1);
+        }
+        clape_type_t ret = clape_parse_type(p);
+        tok = clape_advance(p);
+        if (tok->tag != TOK_RPAREN) {
+            fprintf(stderr, "Expected ')' in function type\n");
+            exit(1);
+        }
+        clape_type_t *param_ptr = malloc(sizeof(clape_type_t));
+        *param_ptr = param;
+        clape_type_t *ret_ptr = malloc(sizeof(clape_type_t));
+        *ret_ptr = ret;
+        return (clape_type_t){
+            .tag = CLAPE_TYPE_FUNC,
+            .value.func = {.param = param_ptr, .ret = ret_ptr},
+        };
+    }
+    tok = clape_advance(p);
+    switch (tok->tag) {
+        case TOK_TYPE_INT:
+            return (clape_type_t){.tag = CLAPE_TYPE_INT};
+        case TOK_TYPE_FLOAT:
+            return (clape_type_t){.tag = CLAPE_TYPE_FLOAT};
+        case TOK_TYPE_BOOL:
+            return (clape_type_t){.tag = CLAPE_TYPE_BOOL};
+        case TOK_TYPE_UNIT:
+            return (clape_type_t){.tag = CLAPE_TYPE_UNIT};
+        default:
+            fprintf(stderr, "Expected a type (Int, Float, Bool, Unit)\n");
+            exit(1);
+    }
 }
 
 static clape_binding_power_t clape_infix_bp(token_type_e tag) {
@@ -847,14 +1063,67 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             break;
         }
         case TOK_LPAREN: {
-            lhs = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+            token_t *next = clape_peek(p);
+            bool is_lambda = false;
+            if (next->tag == TOK_RPAREN) {
+                if (p->pos + 1 < p->tokens->len) {
+                    is_lambda = (ACCESS_ARR_AT(token_t, p->tokens, p->pos + 1)->tag == TOK_ARROW);
+                }
+            } else if (next->tag == TOK_IDENTIFIER) {
+                if (p->pos + 1 < p->tokens->len) {
+                    is_lambda = (ACCESS_ARR_AT(token_t, p->tokens, p->pos + 1)->tag == TOK_COLON);
+                }
+            }
+            if (!is_lambda) {
+                lhs = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+                tok = clape_advance(p);
+                if (tok->tag != TOK_RPAREN) {
+                    fprintf(stderr, "Expected ')'\n");
+                    exit(1);
+                }
+            }
+
+            clape_arr_t *params = clape_arr_create(sizeof(clape_param_t), 0);
+            if (next->tag != TOK_RPAREN) {
+                while (true) {
+                    token_t *name_tok = clape_advance(p);
+                    clape_advance(p);
+                    clape_type_t param_type = clape_parse_type(p);
+                    clape_param_t param = {
+                        .name = strdup(name_tok->value.identifier),
+                        .type = param_type,
+                    };
+                    clape_arr_append(sizeof(clape_param_t), &params, &param);
+                    if (clape_peek(p)->tag == TOK_COMMA) {
+                        clape_advance(p);
+                    } else {
+                        break;
+                    }
+                }
+            }
             tok = clape_advance(p);
             if (tok->tag != TOK_RPAREN) {
-                fprintf(stderr, "Expected ')'\n");
+                fprintf(stderr, "Expected ')' in lambda parameter list\n");
                 exit(1);
             }
+            tok = clape_advance(p);
+            if (tok->tag != TOK_ARROW) {
+                fprintf(stderr, "Expected '->' after lambda parameters\n");
+                exit(1);
+            }
+            clape_type_t return_type = clape_parse_type(p);
+            clape_expr_t body = clape_parse_block(p);
+            clape_expr_t *body_ptr = malloc(sizeof(clape_expr_t));
+            *body_ptr = body;
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_LAMBDA,
+                .value.lambda = {.params = params, .return_type = return_type, .body = body_ptr},
+            };
             break;
         }
+        case TOK_LBRACE:
+            lhs = clape_parse_block(p);
+            break;
         case TOK_IDENTIFIER:
             lhs = (clape_expr_t){
                 .tag = CLAPE_EXPR_IDENT,
@@ -938,7 +1207,8 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                 .value.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
             };
         } else if ((next == TOK_INT || next == TOK_FLOAT || next == TOK_TRUE || next == TOK_FALSE ||
-                       next == TOK_NOT || next == TOK_LPAREN || next == TOK_IDENTIFIER) &&
+                       next == TOK_NOT || next == TOK_LPAREN || next == TOK_LBRACE ||
+                       next == TOK_IDENTIFIER) &&
             CLAPE_BINDING_POWER_CALL > min_bp) {
             cur_bp = CLAPE_BINDING_POWER_CALL;
             clape_expr_t arg = clape_parse_expr(p, cur_bp);
@@ -979,6 +1249,36 @@ static clape_stmt_t clape_parse_stmt(clape_parser_t *p) {
     return stmt;
 }
 
+static clape_expr_t clape_parse_block(clape_parser_t *p) {
+    token_t *tok = clape_advance(p);
+    if (tok->tag != TOK_LBRACE) {
+        fprintf(stderr, "Expected '{'\n");
+        exit(1);
+    }
+    clape_arr_t *stmts = clape_arr_create(sizeof(clape_stmt_t), 0);
+    while (clape_peek(p)->tag == TOK_LET) {
+        clape_stmt_t stmt = clape_parse_stmt(p);
+        clape_arr_append(sizeof(clape_stmt_t), &stmts, &stmt);
+        while (clape_peek(p)->tag == TOK_SEMICOLON) {
+            clape_advance(p);
+        }
+    }
+    clape_expr_t *ret_expr = NULL;
+    if (clape_peek(p)->tag != TOK_RBRACE) {
+        ret_expr = malloc(sizeof(clape_expr_t));
+        *ret_expr = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+    }
+    tok = clape_advance(p);
+    if (tok->tag != TOK_RBRACE) {
+        fprintf(stderr, "Expected '}'\n");
+        exit(1);
+    }
+    return (clape_expr_t){
+        .tag = CLAPE_EXPR_BLOCK,
+        .value.block = {.stmts = stmts, .return_expr = ret_expr},
+    };
+}
+
 // ----- Public API -----
 
 bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
@@ -992,6 +1292,9 @@ bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
         }
         clape_stmt_t stmt = clape_parse_stmt(&p);
         clape_arr_append(sizeof(clape_stmt_t), &program->statements, &stmt);
+        while (clape_peek(&p)->tag == TOK_SEMICOLON) {
+            clape_advance(&p);
+        }
     }
     return true;
 }
@@ -1076,6 +1379,12 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
             clape_print_expr(stream, expr->value.call.arg);
             fprintf(stream, ")");
             break;
+        case CLAPE_EXPR_LAMBDA:
+            fprintf(stream, "<lambda>");
+            break;
+        case CLAPE_EXPR_BLOCK:
+            fprintf(stream, "<block>");
+            break;
     }
 }
 
@@ -1114,6 +1423,26 @@ static void clape_free_expr(clape_expr_t *expr) {
             clape_free_expr(expr->value.call.arg);
             free(expr->value.call.callee);
             free(expr->value.call.arg);
+            break;
+        case CLAPE_EXPR_LAMBDA:
+            for (size_t i = 0; i < expr->value.lambda.params->len; i++) {
+                free(ACCESS_ARR_AT(clape_param_t, expr->value.lambda.params, i)->name);
+            }
+            free(expr->value.lambda.params);
+            clape_free_expr(expr->value.lambda.body);
+            free(expr->value.lambda.body);
+            break;
+        case CLAPE_EXPR_BLOCK:
+            for (size_t i = 0; i < expr->value.block.stmts->len; i++) {
+                clape_stmt_t *s = ACCESS_ARR_AT(clape_stmt_t, expr->value.block.stmts, i);
+                free(s->value.let.name);
+                clape_free_expr(&s->value.let.expr);
+            }
+            free(expr->value.block.stmts);
+            if (expr->value.block.return_expr) {
+                clape_free_expr(expr->value.block.return_expr);
+                free(expr->value.block.return_expr);
+            }
             break;
     }
 }
@@ -1346,6 +1675,42 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                 }
             }
         }
+        case CLAPE_EXPR_LAMBDA: {
+            clape_fn_t *fn = malloc(sizeof(clape_fn_t));
+            *fn = (clape_fn_t){
+                .is_builtin = false,
+                .params = expr->value.lambda.params,
+                .return_type = expr->value.lambda.return_type,
+                .body = expr->value.lambda.body,
+                .builtin_fn = NULL,
+                .next_param_index = 0,
+                .closure = env,
+            };
+            return (clape_value_t){
+                .type = {.tag = CLAPE_TYPE_FUNC},
+                .value.fn = fn,
+            };
+        }
+        case CLAPE_EXPR_BLOCK: {
+            clape_env_t *block_env = env;
+            for (size_t i = 0; i < expr->value.block.stmts->len; i++) {
+                clape_stmt_t *s = ACCESS_ARR_AT(clape_stmt_t, expr->value.block.stmts, i);
+                clape_value_t val = clape_eval(&s->value.let.expr, block_env);
+                if (strcmp(s->value.let.name, "_") != 0) {
+                    clape_env_t *binding = malloc(sizeof(clape_env_t));
+                    *binding = (clape_env_t){
+                        .name = strdup(s->value.let.name),
+                        .value = val,
+                        .next = block_env,
+                    };
+                    block_env = binding;
+                }
+            }
+            if (expr->value.block.return_expr) {
+                return clape_eval(expr->value.block.return_expr, block_env);
+            }
+            return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
+        }
         case CLAPE_EXPR_CALL: {
             clape_value_t callee = clape_eval(expr->value.call.callee, env);
             clape_value_t arg = clape_eval(expr->value.call.arg, env);
@@ -1353,7 +1718,39 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                 fprintf(stderr, "Attempted to call a non-function value\n");
                 exit(1);
             }
-            return callee.value.fn(arg);
+            clape_fn_t *fn = callee.value.fn;
+
+            if (fn->is_builtin) {
+                return fn->builtin_fn(arg);
+            }
+
+            size_t idx = fn->next_param_index;
+            clape_param_t *param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
+
+            clape_env_t *new_closure = malloc(sizeof(clape_env_t));
+            *new_closure = (clape_env_t){
+                .name = strdup(param->name),
+                .value = arg,
+                .next = fn->closure,
+            };
+
+            if (idx + 1 == fn->params->len) {
+                return clape_eval(fn->body, new_closure);
+            }
+            clape_fn_t *partial = malloc(sizeof(clape_fn_t));
+            *partial = (clape_fn_t){
+                .is_builtin = false,
+                .params = fn->params,
+                .return_type = fn->return_type,
+                .body = fn->body,
+                .builtin_fn = NULL,
+                .next_param_index = idx + 1,
+                .closure = new_closure,
+            };
+            return (clape_value_t){
+                .type = {.tag = CLAPE_TYPE_FUNC},
+                .value.fn = partial,
+            };
         }
     }
 }
@@ -1383,6 +1780,9 @@ static void clape_env_free(clape_env_t *env) {
     while (env) {
         clape_env_t *next = env->next;
         free(env->name);
+        if (env->value.type.tag == CLAPE_TYPE_FUNC) {
+            free(env->value.value.fn);
+        }
         free(env);
         env = next;
     }
@@ -1416,13 +1816,23 @@ void clape_interpret(clape_program_t *const program) {
                     fprintf(stderr, "Unknown module: %s\n", stmt->value.use.module);
                     exit(1);
                 }
+                clape_fn_t *print_fn = malloc(sizeof(clape_fn_t));
+                *print_fn = (clape_fn_t){
+                    .is_builtin = true,
+                    .params = NULL,
+                    .return_type = {.tag = CLAPE_TYPE_UNIT},
+                    .body = NULL,
+                    .builtin_fn = clape_builtin_print,
+                    .next_param_index = 0,
+                    .closure = NULL,
+                };
                 clape_env_t *binding = malloc(sizeof(clape_env_t));
                 *binding = (clape_env_t){
                     .name = strdup("print"),
                     .value =
                         (clape_value_t){
                             .type = {.tag = CLAPE_TYPE_FUNC},
-                            .value.fn = clape_builtin_print,
+                            .value.fn = print_fn,
                         },
                     .next = env,
                 };

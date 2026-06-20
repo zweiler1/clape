@@ -1,25 +1,33 @@
 use Print
 
-let x = 3.14
-let y = 2.0
-let z = x * y
+let add = (x: Int, y: Int) -> Int {
+    x + y
+}
+let _ = print (add 3 4)
 
-let _ = print x
-let _ = print y
-let _ = print z
+let add5 = add 5
+let _ = print (add5 10)
 
-let cmp = x > y
-let _ = print cmp
+let mul_then_add = (a: Int, b: Int, c: Int) -> Int {
+    let prod = a * b;
+    prod + c
+}
+let _ = print (mul_then_add 3 4 5)
 
-let eq = 42 == 42
-let _ = print eq
+let make_adder = (n: Int) -> (Int -> Int) {
+    let inner = (x: Int) -> Int {
+        x + n
+    };
+    inner
+}
+let inc = make_adder 1
+let _ = print (inc 99)
 
-let ne = 42 != 42
-let _ = print ne
+let _ = print ((make_adder 10) 20)
 
-let _ = print (ne or eq)
-let _ = print (true or false)
-let _ = print (false and false)
-let _ = print (false == false)
-let _ = print (true and true)
-let _ = print (not false or false)
+let x = 5
+let y = 10
+let _ = print (x + y)
+let _ = print (1 < 2 and 3 > 1)
+let _ = print (not false)
+let _ = print (45 + 55)
