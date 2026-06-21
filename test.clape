@@ -1,7 +1,77 @@
 use Print
 
-let get10 = (value: Int) -> Int {
-    "Hi There"
+let _ = print "--- Option<T> ---"
+
+let Option<T> = Some(T) | None
+
+let get_first<T> = (list: [T]) -> Option<T> {
+    match list {
+        [] => .None;
+        head :: tail => .Some(head)
+    }
 }
 
-let _ = print {get10 "Hi There"}
+let _ = print {get_first []}
+let _ = print {get_first [1, 2, 3]}
+let _ = print {get_first ["Hi", "There"]}
+
+
+let _ = print '\n'
+let _ = print "--- Result<T, E> ---"
+
+let Result<T, E> = Ok(T) | Err(E)
+
+let div = (x: Int, y: Int) -> Result<Int, String> {
+    {
+        .Ok(x / y)
+    } if y != 0 else {
+        .Err("Division by zero detected")
+    }
+}
+
+let _ = print {div 10 2}
+let _ = print {div 10 0}
+
+
+let _ = print '\n'
+let _ = print "--- Pair<T, U> ---"
+
+let Pair<T, U> = first(T) & second(U)
+
+let pack<T, U> = (f: T, s: U) -> Pair<T, U> {
+    .first(f) & .second(s)
+}
+
+let _ = print {pack 10 "Wohoo"}
+let _ = print {pack 'A' 3.14}
+
+
+let _ = print '\n'
+let _ = print "--- Map<K, V> ---"
+
+let Map<K, V> = [key(K) & value(V)]
+let StringMap<T> = Map<String, T>
+
+let emplace<T> = (map: StringMap<T>, key: String, value: T) -> StringMap<T> {
+    match map {
+        [] => [.key(key) & .value(value)];
+        head :: tail => {
+            { .key(key) & .value(value) } :: tail
+        } if head.key == key else {
+            head :: {emplace tail key value}
+        }
+    }
+}
+
+let make_value<T> = (key: String, value: T) -> key(String) & value(T) {
+    .key(key) & .value(value)
+}
+
+let map = [make_value "x" 10]
+let _ = print map
+
+let added = emplace map "y" 20
+let _ = print added
+
+let overwritten = emplace added "x" 30
+let _ = print overwritten

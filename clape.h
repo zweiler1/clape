@@ -112,6 +112,7 @@ typedef enum {
     CLAPE_TYPE_UNIT,
     CLAPE_TYPE_PRODUCT,
     CLAPE_TYPE_SUM,
+    CLAPE_TYPE_GENERIC,
 } clape_type_e;
 
 /// @struct `clape_type_t`
@@ -142,6 +143,14 @@ typedef struct clape_type_t {
         struct {
             clape_arr_t *variants;
         } sum;
+
+        /// @variation `list`
+        /// @brief An element type for list types (NULL if element type unknown/unchecked)
+        struct clape_type_t *element;
+
+        /// @variation `generic`
+        /// @brief A generic type parameter placeholder (e.g. `T` in `Option<T>`)
+        char *generic;
     } u;
 } clape_type_t;
 
@@ -366,8 +375,18 @@ typedef struct clape_expr_t {
             /// @brief An array of all paramters, where every value of the array is of type
             /// `clape_param_t`
             clape_arr_t *params;
+
+            /// @var `return_type`
+            /// @brief The return type of the function
             clape_type_t return_type;
+
+            /// @var `body`
+            /// @brief The body expression of the lambda definition, this is always a block
             struct clape_expr_t *body;
+
+            /// @var `generic_params`
+            /// @brief Array of char* generic parameter names, or NULL if not generic
+            clape_arr_t *generic_params;
         } lambda;
 
         /// @variation `if_`
@@ -560,6 +579,22 @@ typedef struct clape_env_t {
     struct clape_env_t *next;
 } clape_env_t;
 
+/// @struct `clape_generic_binding`
+/// @brief A linked-list node mapping a generic parameter name to its inferred concrete type
+typedef struct clape_generic_binding {
+    /// @var `name`
+    /// @brief The generic parameter name (e.g. "T")
+    char *name;
+
+    /// @var `type`
+    /// @brief The inferred concrete type
+    clape_type_t type;
+
+    /// @var `next`
+    /// @brief The next binding in the chain
+    struct clape_generic_binding *next;
+} clape_generic_binding_t;
+
 /// @struct `clape_fn_t`
 /// @brief A function descriptor holding either a builtin or a user-defined function including
 /// partial application state
@@ -591,6 +626,14 @@ typedef struct clape_fn_t {
     /// @var `closure`
     /// @brief The captured environment of this defined function, for closures
     struct clape_env_t *closure;
+
+    /// @var `generic_params`
+    /// @brief Array of char* generic parameter names, or NULL if not generic
+    clape_arr_t *generic_params;
+
+    /// @var `genv`
+    /// @brief Linked list of inferred generic type bindings (built up during partial application)
+    struct clape_generic_binding *genv;
 } clape_fn_t;
 
 /// @enum `token_type_e`
@@ -709,7 +752,7 @@ typedef struct token_t {
 ///
 /// @param `stream` The file stream to print the given token to
 /// @param `token` The token to print
-void clape_print_token(FILE *const stream, token_t *const token);
+void clape_print_token(FILE *const stream, const token_t *const token);
 
 /// @function `clape_free_tokens`
 /// @brief Frees a given token array and frees all potentially allocated memory inside (from
@@ -1272,7 +1315,7 @@ clape_arr_t *clape_tokenize(char *const file_content) {
     return tokens;
 }
 
-void clape_print_token(FILE *const stream, token_t *const token) {
+void clape_print_token(FILE *const stream, const token_t *const token) {
     switch (token->tag) {
         case TOK_PLUS:
             fprintf(stream, "+");
@@ -1548,33 +1591,30 @@ typedef struct {
     clape_arr_t *tokens;
     size_t pos;
 
-    /// @var type_env
+    /// @var `type_env`
     /// @brief Linked list of product / sum type bindings (populated at parse time only)
     struct clape_type_binding {
         /// @var `name`
         /// @brief The name of the binding
         char *name;
 
-        /// @var `is_sum`
-        /// @brief True if this is a sum type binding, false if product type binding
-        bool is_sum;
+        /// @var `generic_params`
+        /// @brief Array of char* generic parameter names, or NULL if not generic
+        clape_arr_t *generic_params;
 
-        /// @var `u`
-        /// @brief Union of product fields or sum variants
-        union {
-            /// @var `fields`
-            /// @brief An array where every element is of type 'clape_product_field_t'
-            clape_arr_t *fields;
-
-            /// @var `variants`
-            /// @brief An array where every element is of type 'clape_sum_variant_t'
-            clape_arr_t *variants;
-        } u;
+        /// @var `type_body`
+        /// @brief The full type stored in this binding (product, sum, list, etc.)
+        clape_type_t type_body;
 
         /// @var `next`
         /// @brief The next type binding in the environment
         struct clape_type_binding *next;
     } *type_env;
+
+    /// @var `generic_names`
+    /// @brief Array of generic parameter names (char*) active during RHS parsing, like `T` in
+    /// `let Option<T> = ...`
+    clape_arr_t *generic_names;
 } clape_parser_t;
 
 static token_t *clape_peek(clape_parser_t *p) {
@@ -1591,6 +1631,16 @@ static clape_expr_t clape_parse_block_body(clape_parser_t *p);
 static clape_expr_t clape_parse_block(clape_parser_t *p);
 static void clape_free_type(clape_type_t *const type);
 static clape_type_t clape_type_clone(const clape_type_t *const type);
+static const clape_generic_binding_t *clape_find_generic( //
+    const clape_generic_binding_t *genv, const char *name //
+);
+static clape_generic_binding_t *clape_genv_prepend(                    //
+    clape_generic_binding_t *genv, const char *name, clape_type_t type //
+);
+static void clape_genv_free(clape_generic_binding_t *genv);
+static clape_type_t clape_type_substitute(                        //
+    const clape_type_t *type, const clape_generic_binding_t *genv //
+);
 
 static clape_type_t clape_parse_type(clape_parser_t *p) {
     token_t *tok = clape_peek(p);
@@ -1627,13 +1677,14 @@ static clape_type_t clape_parse_type(clape_parser_t *p) {
 
     if (tok->tag == TOK_LBRACKET) {
         clape_advance(p);
-        clape_parse_type(p);
-        token_t *close = clape_advance(p);
+        clape_type_t *const inner = malloc(sizeof(clape_type_t));
+        *inner = clape_parse_type(p);
+        token_t *const close = clape_advance(p);
         if (close->tag != TOK_RBRACKET) {
             fprintf(stderr, "Expected ']' in list type\n");
             exit(1);
         }
-        result = (clape_type_t){.tag = CLAPE_TYPE_LIST};
+        result = (clape_type_t){.tag = CLAPE_TYPE_LIST, .u.element = inner};
         goto check_amp;
     }
 
@@ -1681,48 +1732,67 @@ static clape_type_t clape_parse_type(clape_parser_t *p) {
             result = (clape_type_t){.tag = CLAPE_TYPE_UNIT};
             break;
         case TOK_IDENTIFIER: {
+            // Check if this is a generic param name
+            if (p->generic_names != NULL) {
+                for (size_t i = 0; i < p->generic_names->len; i++) {
+                    char *const name = *ACCESS_ARR_AT(char *, p->generic_names, i);
+                    if (strcmp(name, tok->u.identifier) != 0) {
+                        continue;
+                    }
+                    result = (clape_type_t){
+                        .tag = CLAPE_TYPE_GENERIC,
+                        .u.generic = strdup(name),
+                    };
+                    return result;
+                }
+            }
             for (struct clape_type_binding *b = p->type_env; b; b = b->next) {
                 if (strcmp(b->name, tok->u.identifier) != 0) {
                     continue;
                 }
-                if (!b->is_sum) {
-                    // Is Product
-                    clape_arr_t *fields = clape_arr_create(sizeof(clape_product_field_t), 0);
-                    for (size_t i = 0; i < b->u.fields->len; i++) {
-                        clape_product_field_t *src = ACCESS_ARR_AT( //
-                            clape_product_field_t, b->u.fields, i   //
-                        );
-                        clape_product_field_t field = {
-                            .name = strdup(src->name),
-                            .type = src->type,
-                        };
-                        clape_arr_append(sizeof(clape_product_field_t), &fields, &field);
+                if (clape_peek(p)->tag == TOK_LT) {
+                    // Type application: Option<Int>
+                    if (b->generic_params == NULL || b->generic_params->len == 0) {
+                        fprintf(stderr, "Type '%s' is not generic\n", b->name);
+                        exit(1);
                     }
-                    result = (clape_type_t){
-                        .tag = CLAPE_TYPE_PRODUCT,
-                        .u.product = {.fields = fields},
-                    };
+                    // consume the `<`
+                    clape_advance(p);
+                    const size_t nparams = b->generic_params->len;
+                    clape_generic_binding_t *genv = NULL;
+                    for (size_t arg_index = 0; arg_index < nparams; arg_index++) {
+                        clape_type_t arg_type = clape_parse_type(p);
+                        char *const pname = *ACCESS_ARR_AT(char *, b->generic_params, arg_index);
+                        genv = clape_genv_prepend(genv, pname, arg_type);
+                        if (arg_index + 1 < nparams) {
+                            token_t *const comma = clape_advance(p);
+                            if (comma->tag != TOK_COMMA) {
+                                fprintf(stderr, "Expected ',' in generic type arguments\n");
+                                exit(1);
+                            }
+                        }
+                    }
+                    token_t *const close = clape_advance(p);
+                    if (close->tag != TOK_GT) {
+                        fprintf(stderr, "Expected '>' after generic type arguments\n");
+                        exit(1);
+                    }
+                    // Substitute the type body
+                    result = clape_type_substitute(&b->type_body, genv);
+                    clape_genv_free(genv);
+                    // Continue with & or | combining
                     goto check_amp;
                 }
-                // Is Sum
-                clape_arr_t *variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
-                for (size_t i = 0; i < b->u.variants->len; i++) {
-                    clape_sum_variant_t *const src = ACCESS_ARR_AT( //
-                        clape_sum_variant_t, b->u.variants, i       //
-                    );
-                    clape_sum_variant_t v = {
-                        .name = strdup(src->name),
-                        .has_type = src->has_type,
-                    };
-                    if (src->has_type) {
-                        v.type = clape_type_clone(&src->type);
-                    }
-                    clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
+                // Non-generic reference: clone the stored type body
+                result = clape_type_clone(&b->type_body);
+                if (result.tag == CLAPE_TYPE_PRODUCT) {
+                    goto check_amp;
                 }
-                result = (clape_type_t){
-                    .tag = CLAPE_TYPE_SUM,
-                    .u.sum = {.variants = variants},
-                };
+                // For sum types, allow pipe combination
+                if (clape_peek(p)->tag == TOK_PIPE && result.tag != CLAPE_TYPE_SUM) {
+                    fprintf(stderr, "'|' requires sum types\n");
+                    exit(1);
+                }
                 while (clape_peek(p)->tag == TOK_PIPE) {
                     clape_advance(p);
                     clape_type_t rhs = clape_parse_type(p);
@@ -2135,6 +2205,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             break;
         }
         case TOK_LBRACKET: {
+            // The `[` was already consumed at line 2022
             clape_arr_t *elems = clape_arr_create(sizeof(clape_expr_t), 0);
             if (clape_peek(p)->tag != TOK_RBRACKET) {
                 while (true) {
@@ -2151,6 +2222,21 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             if (close->tag != TOK_RBRACKET) {
                 fprintf(stderr, "Expected ']'\n");
                 exit(1);
+            }
+            // If exactly one element and it's a type expr, treat as list type [T]
+            if (elems->len == 1) {
+                clape_expr_t *const only = ACCESS_ARR_AT(clape_expr_t, elems, 0);
+                if (only->tag == CLAPE_EXPR_TYPE) {
+                    clape_type_t *const inner = malloc(sizeof(clape_type_t));
+                    *inner = clape_type_clone(&only->u.type_expr.type);
+                    clape_free_expr(only);
+                    free(elems);
+                    lhs = (clape_expr_t){
+                        .tag = CLAPE_EXPR_TYPE,
+                        .u.type_expr = {.type = {.tag = CLAPE_TYPE_LIST, .u.element = inner}},
+                    };
+                    break;
+                }
             }
             lhs = (clape_expr_t){
                 .tag = CLAPE_EXPR_LIST,
@@ -2293,95 +2379,104 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                         },
                 };
             } else {
-                // Check if this identifier is a known type name
-                bool in_type_env = false;
-                for (struct clape_type_binding *b = p->type_env; b; b = b->next) {
-                    if (strcmp(b->name, tok->u.identifier) == 0) {
-                        in_type_env = true;
+                // Check if this identifier is a generic parameter name
+                bool is_generic_param = false;
+                if (p->generic_names != NULL) {
+                    for (size_t i = 0; i < p->generic_names->len; i++) {
+                        char *const name = *ACCESS_ARR_AT(char *, p->generic_names, i);
+                        if (strcmp(name, tok->u.identifier) != 0) {
+                            continue;
+                        }
+                        lhs = (clape_expr_t){
+                            .tag = CLAPE_EXPR_TYPE,
+                            .u.type_expr = {.type =
+                                                {
+                                                    .tag = CLAPE_TYPE_GENERIC,
+                                                    .u.generic = strdup(name),
+                                                }},
+                        };
+                        is_generic_param = true;
                         break;
                     }
                 }
-                if (in_type_env) {
+                if (!is_generic_param) {
+                    // Check if this identifier is a known type name
+                    bool in_type_env = false;
                     for (struct clape_type_binding *b = p->type_env; b; b = b->next) {
-                        if (strcmp(b->name, tok->u.identifier) != 0) {
-                            continue;
+                        if (strcmp(b->name, tok->u.identifier) == 0) {
+                            in_type_env = true;
+                            break;
                         }
-                        if (b->is_sum) {
-                            clape_arr_t *variants = clape_arr_create( //
-                                sizeof(clape_sum_variant_t), 0        //
-                            );
-                            for (size_t i = 0; i < b->u.variants->len; i++) {
-                                clape_sum_variant_t *const src = ACCESS_ARR_AT( //
-                                    clape_sum_variant_t, b->u.variants, i       //
-                                );
-                                clape_sum_variant_t v = {
-                                    .name = strdup(src->name),
-                                    .has_type = src->has_type,
-                                };
-                                if (src->has_type) {
-                                    v.type = clape_type_clone(&src->type);
-                                }
-                                clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
-                            }
-                            lhs = (clape_expr_t){
-                                .tag = CLAPE_EXPR_TYPE,
-                                .u.type_expr =
-                                    {
-                                        .type =
-                                            {
-                                                .tag = CLAPE_TYPE_SUM,
-                                                .u.sum = {.variants = variants},
-                                            },
-                                    },
-                            };
-                        } else {
-                            clape_arr_t *fields = clape_arr_create( //
-                                sizeof(clape_product_field_t), 0    //
-                            );
-                            for (size_t i = 0; i < b->u.fields->len; i++) {
-                                clape_product_field_t *const src = ACCESS_ARR_AT( //
-                                    clape_product_field_t, b->u.fields, i         //
-                                );
-                                clape_product_field_t f = {
-                                    .name = strdup(src->name),
-                                    .type = src->type,
-                                };
-                                clape_arr_append(sizeof(clape_product_field_t), &fields, &f);
-                            }
-                            lhs = (clape_expr_t){
-                                .tag = CLAPE_EXPR_TYPE,
-                                .u.type_expr =
-                                    {
-                                        .type =
-                                            {
-                                                .tag = CLAPE_TYPE_PRODUCT,
-                                                .u.product = {.fields = fields},
-                                            },
-                                    },
-                            };
-                        }
-                        break;
                     }
-                } else if (is_upper) {
-                    // Standalone sum constructor without payload: None (in type definition)
-                    clape_arr_t *variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
-                    clape_sum_variant_t v = {
-                        .name = strdup(tok->u.identifier),
-                        .has_type = false,
-                    };
-                    clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
-                    lhs = (clape_expr_t){
-                        .tag = CLAPE_EXPR_TYPE,
-                        .u.type_expr =
-                            {
-                                .type = {.tag = CLAPE_TYPE_SUM, .u.sum = {.variants = variants}},
-                            },
-                    };
-                } else {
-                    lhs = (clape_expr_t){
-                        .tag = CLAPE_EXPR_IDENT,
-                        .u.ident = strdup(tok->u.identifier),
-                    };
+                    if (in_type_env) {
+                        for (struct clape_type_binding *b = p->type_env; b; b = b->next) {
+                            if (strcmp(b->name, tok->u.identifier) != 0) {
+                                continue;
+                            }
+                            if (clape_peek(p)->tag != TOK_LT) {
+                                lhs = (clape_expr_t){
+                                    .tag = CLAPE_EXPR_TYPE,
+                                    .u.type_expr = {.type = clape_type_clone(&b->type_body)},
+                                };
+                                break;
+                            }
+                            if (!b->generic_params || b->generic_params->len == 0) {
+                                fprintf(stderr, "Type '%s' is not generic\n", b->name);
+                                exit(1);
+                            }
+                            clape_advance(p);
+                            const size_t nparams = b->generic_params->len;
+                            clape_generic_binding_t *genv = NULL;
+                            for (size_t arg_index = 0; arg_index < nparams; arg_index++) {
+                                const clape_type_t arg_type = clape_parse_type(p);
+                                char *const pname = *ACCESS_ARR_AT(      //
+                                    char *, b->generic_params, arg_index //
+                                );
+                                genv = clape_genv_prepend(genv, pname, arg_type);
+                                if (arg_index + 1 < nparams) {
+                                    token_t *const comma = clape_advance(p);
+                                    if (comma->tag != TOK_COMMA) {
+                                        fprintf(stderr, "Expected ',' in generic type arguments\n");
+                                        exit(1);
+                                    }
+                                }
+                            }
+                            token_t *const close = clape_advance(p);
+                            if (close->tag != TOK_GT) {
+                                fprintf(stderr, "Expected '>' after generic type arguments\n");
+                                exit(1);
+                            }
+                            clape_type_t type_body = clape_type_clone(&b->type_body);
+                            clape_type_t result = clape_type_substitute(&type_body, genv);
+                            clape_free_type(&type_body);
+                            clape_genv_free(genv);
+                            lhs = (clape_expr_t){
+                                .tag = CLAPE_EXPR_TYPE,
+                                .u.type_expr = {.type = result},
+                            };
+                        }
+                    } else if (is_upper) {
+                        // Standalone sum constructor without payload: None (in type definition)
+                        clape_arr_t *variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
+                        clape_sum_variant_t v = {
+                            .name = strdup(tok->u.identifier),
+                            .has_type = false,
+                        };
+                        clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
+                        lhs = (clape_expr_t){
+                            .tag = CLAPE_EXPR_TYPE,
+                            .u.type_expr =
+                                {
+                                    .type = {.tag = CLAPE_TYPE_SUM,
+                                        .u.sum = {.variants = variants}},
+                                },
+                        };
+                    } else {
+                        lhs = (clape_expr_t){
+                            .tag = CLAPE_EXPR_IDENT,
+                            .u.ident = strdup(tok->u.identifier),
+                        };
+                    }
                 }
             }
             break;
@@ -2701,53 +2796,87 @@ static clape_stmt_t clape_parse_stmt(clape_parser_t *p) {
         };
     }
     token_t *name_tok = clape_advance(p);
+
+    // Parse optional generic params: <T, U, ...>
+    clape_arr_t *generic_params = NULL;
+    if (clape_peek(p)->tag == TOK_LT) {
+        if (strcmp(name_tok->u.identifier, "_") == 0) {
+            fprintf(stderr, "Anonymous bindings cannot have generic parameters\n");
+            exit(1);
+        }
+        generic_params = clape_arr_create(sizeof(char *), 0);
+        clape_advance(p); // consume <
+        while (true) {
+            token_t *const gen_tok = clape_advance(p);
+            if (gen_tok->tag != TOK_IDENTIFIER) {
+                fprintf(stderr, "Expected generic parameter name\n");
+                exit(1);
+            }
+            char *gen_name = strdup(gen_tok->u.identifier);
+            clape_arr_append(sizeof(char *), &generic_params, &gen_name);
+            // Push onto generic_names array for RHS parsing
+            if (!p->generic_names) {
+                p->generic_names = clape_arr_create(sizeof(char *), 0);
+            }
+            char *gen_name_copy = strdup(gen_tok->u.identifier);
+            clape_arr_append(sizeof(char *), &p->generic_names, &gen_name_copy);
+            if (clape_peek(p)->tag == TOK_COMMA) {
+                clape_advance(p);
+            } else {
+                break;
+            }
+        }
+        token_t *const close = clape_advance(p);
+        if (close->tag != TOK_GT) {
+            fprintf(stderr, "Expected '>' after generic parameters\n");
+            exit(1);
+        }
+    }
+
+    // Consume the `=`
     clape_advance(p);
 
     clape_expr_t rhs = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
 
+    // Pop generic_names
+    if (p->generic_names) {
+        for (size_t gi = 0; gi < p->generic_names->len; gi++) {
+            free(*(char **)ACCESS_ARR_AT(char *, p->generic_names, gi));
+        }
+        free(p->generic_names);
+        p->generic_names = NULL;
+    }
+
     // If the RHS is a type expression, register a type binding
     if (rhs.tag == CLAPE_EXPR_TYPE) {
-        if (rhs.u.type_expr.type.tag == CLAPE_TYPE_PRODUCT) {
-            clape_arr_t *const fields = rhs.u.type_expr.type.u.product.fields;
-            rhs.u.type_expr.type.u.product.fields = NULL;
-            clape_free_type(&rhs.u.type_expr.type);
-            struct clape_type_binding *const binding = malloc(sizeof(struct clape_type_binding));
-            binding->name = strdup(name_tok->u.identifier);
-            binding->is_sum = false;
-            binding->u.fields = fields;
-            binding->next = p->type_env;
-            p->type_env = binding;
-            return (clape_stmt_t){
-                .tag = CLAPE_STMT_LET,
-                .u.let =
-                    {
-                        .name = strdup(name_tok->u.identifier),
-                        .expr = {.tag = CLAPE_EXPR_PRODUCT_TYPE,
-                            .u.product_type = {.fields = NULL}},
-                    },
-            };
-        } else if (rhs.u.type_expr.type.tag == CLAPE_TYPE_SUM) {
-            clape_arr_t *const variants = rhs.u.type_expr.type.u.sum.variants;
-            rhs.u.type_expr.type.u.sum.variants = NULL;
-            clape_free_type(&rhs.u.type_expr.type);
-            struct clape_type_binding *const binding = malloc(sizeof(struct clape_type_binding));
-            binding->name = strdup(name_tok->u.identifier);
-            binding->is_sum = true;
-            binding->u.variants = variants;
-            binding->next = p->type_env;
-            p->type_env = binding;
-            return (clape_stmt_t){
-                .tag = CLAPE_STMT_LET,
-                .u.let =
-                    {
-                        .name = strdup(name_tok->u.identifier),
-                        .expr = {.tag = CLAPE_EXPR_SUM_TYPE, .u.sum_type = {.variants = NULL}},
-                    },
-            };
-        } else {
-            fprintf(stderr, "Type bindings must define a product or sum type\n");
-            exit(1);
+        clape_type_t type_body = rhs.u.type_expr.type;
+        rhs.u.type_expr.type = (clape_type_t){.tag = CLAPE_TYPE_UNIT};
+        struct clape_type_binding *const binding = malloc(sizeof(struct clape_type_binding));
+        binding->name = strdup(name_tok->u.identifier);
+        binding->generic_params = generic_params;
+        binding->type_body = type_body;
+        binding->next = p->type_env;
+        p->type_env = binding;
+        clape_expr_e tag = CLAPE_EXPR_PRODUCT_TYPE;
+        if (type_body.tag == CLAPE_TYPE_SUM) {
+            tag = CLAPE_EXPR_SUM_TYPE;
         }
+        return (clape_stmt_t){
+            .tag = CLAPE_STMT_LET,
+            .u.let =
+                {
+                    .name = strdup(name_tok->u.identifier),
+                    .expr = {.tag = tag, .u.product_type = {.fields = NULL}},
+                },
+        };
+    }
+
+    // For function bindings with generic params, attach them to the lambda expression
+    if (generic_params != NULL && rhs.tag == CLAPE_EXPR_LAMBDA) {
+        rhs.u.lambda.generic_params = generic_params;
+    } else if (generic_params != NULL) {
+        fprintf(stderr, "Generic parameters are only allowed on type and function definitions\n");
+        exit(1);
     }
 
     clape_stmt_t stmt = {
@@ -2777,7 +2906,7 @@ static clape_expr_t clape_parse_block_body(clape_parser_t *p) {
     }
     token_t *tok = clape_advance(p);
     if (tok->tag != TOK_RBRACE) {
-        fprintf(stderr, "Expected '}'\n");
+        throw_err(stderr, "Expected '}' but got: ", tok, true);
         exit(1);
     }
     return (clape_expr_t){
@@ -2789,7 +2918,7 @@ static clape_expr_t clape_parse_block_body(clape_parser_t *p) {
 static clape_expr_t clape_parse_block(clape_parser_t *p) {
     token_t *tok = clape_advance(p);
     if (tok->tag != TOK_LBRACE) {
-        fprintf(stderr, "Expected '{'\n");
+        throw_err(stderr, "Expected '{' but got: ", tok, true);
         exit(1);
     }
     return clape_parse_block_body(p);
@@ -2800,6 +2929,7 @@ static clape_expr_t clape_parse_block(clape_parser_t *p) {
 bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
     clape_parser_t p = {.tokens = tokens, .pos = 0};
     program->statements = clape_arr_create(sizeof(clape_stmt_t), 0);
+    p.generic_names = NULL;
     while (clape_peek(&p)->tag != TOK_EOF) {
         token_t *const tok = clape_peek(&p);
         if (tok->tag != TOK_LET && tok->tag != TOK_USE) {
@@ -2812,32 +2942,25 @@ bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
             clape_advance(&p);
         }
     }
+    // Free generic names (should be empty at this point, but be safe)
+    if (p.generic_names) {
+        for (size_t i = 0; i < p.generic_names->len; i++) {
+            free(*ACCESS_ARR_AT(char *, p.generic_names, i));
+        }
+        free(p.generic_names);
+    }
     // Free type env
     struct clape_type_binding *binding = p.type_env;
     while (binding != NULL) {
         struct clape_type_binding *const next = binding->next;
         free(binding->name);
-        if (binding->is_sum) {
-            if (binding->u.variants) {
-                for (size_t i = 0; i < binding->u.variants->len; i++) {
-                    clape_sum_variant_t *const variant = ACCESS_ARR_AT( //
-                        clape_sum_variant_t, binding->u.variants, i     //
-                    );
-                    free(variant->name);
-                    if (variant->has_type) {
-                        clape_free_type(&variant->type);
-                    }
-                }
-                free(binding->u.variants);
+        if (binding->generic_params) {
+            for (size_t i = 0; i < binding->generic_params->len; i++) {
+                free(*ACCESS_ARR_AT(char *, binding->generic_params, i));
             }
-        } else {
-            if (binding->u.fields) {
-                for (size_t i = 0; i < binding->u.fields->len; i++) {
-                    free(ACCESS_ARR_AT(clape_product_field_t, binding->u.fields, i)->name);
-                }
-                free(binding->u.fields);
-            }
+            free(binding->generic_params);
         }
+        clape_free_type(&binding->type_body);
         free(binding);
         binding = next;
     }
@@ -2874,6 +2997,9 @@ static void clape_print_type(FILE *stream, clape_type_t *type) {
             clape_print_type(stream, type->u.func.ret);
             fprintf(stream, ")");
             break;
+        case CLAPE_TYPE_GENERIC:
+            fprintf(stream, "%s", type->u.generic);
+            break;
         case CLAPE_TYPE_PRODUCT:
             for (size_t i = 0; i < type->u.product.fields->len; i++) {
                 if (i > 0) {
@@ -2902,6 +3028,85 @@ static void clape_print_type(FILE *stream, clape_type_t *type) {
                 }
             }
             break;
+    }
+}
+
+/// @brief Walk a type tree and substitute `CLAPE_TYPE_GENERIC` nodes with their concrete types
+/// from the generic binding environment. Returns a new heap-allocated type; the caller owns it.
+static clape_type_t clape_type_substitute(const clape_type_t *type,
+    const clape_generic_binding_t *genv) {
+    switch (type->tag) {
+        case CLAPE_TYPE_GENERIC: {
+            for (const clape_generic_binding_t *b = genv; b; b = b->next) {
+                if (strcmp(b->name, type->u.generic) == 0) {
+                    return clape_type_clone(&b->type);
+                }
+            }
+            return clape_type_clone(type);
+        }
+        case CLAPE_TYPE_PRODUCT: {
+            clape_arr_t *fields = NULL;
+            if (type->u.product.fields) {
+                fields = clape_arr_create(sizeof(clape_product_field_t), 0);
+                for (size_t i = 0; i < type->u.product.fields->len; i++) {
+                    clape_product_field_t *const src = ACCESS_ARR_AT(    //
+                        clape_product_field_t, type->u.product.fields, i //
+                    );
+                    clape_product_field_t f = {
+                        .name = strdup(src->name),
+                        .type = clape_type_substitute(&src->type, genv),
+                    };
+                    clape_arr_append(sizeof(clape_product_field_t), &fields, &f);
+                }
+            }
+            return (clape_type_t){
+                .tag = CLAPE_TYPE_PRODUCT,
+                .u.product = {.fields = fields},
+            };
+        }
+        case CLAPE_TYPE_SUM: {
+            clape_arr_t *variants = NULL;
+            if (type->u.sum.variants) {
+                variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
+                for (size_t i = 0; i < type->u.sum.variants->len; i++) {
+                    clape_sum_variant_t *const src = ACCESS_ARR_AT(  //
+                        clape_sum_variant_t, type->u.sum.variants, i //
+                    );
+                    clape_sum_variant_t v = {
+                        .name = strdup(src->name),
+                        .has_type = src->has_type,
+                    };
+                    if (src->has_type) {
+                        v.type = clape_type_substitute(&src->type, genv);
+                    }
+                    clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
+                }
+            }
+            return (clape_type_t){
+                .tag = CLAPE_TYPE_SUM,
+                .u.sum = {.variants = variants},
+            };
+        }
+        case CLAPE_TYPE_LIST:
+            if (type->u.element) {
+                clape_type_t *const inner = malloc(sizeof(clape_type_t));
+                *inner = clape_type_substitute(type->u.element, genv);
+                return (clape_type_t){.tag = CLAPE_TYPE_LIST, .u.element = inner};
+            }
+            return (clape_type_t){.tag = CLAPE_TYPE_LIST, .u.element = NULL};
+
+        case CLAPE_TYPE_FUNC: {
+            clape_type_t *const param = malloc(sizeof(clape_type_t));
+            *param = clape_type_substitute(type->u.func.param, genv);
+            clape_type_t *const ret = malloc(sizeof(clape_type_t));
+            *ret = clape_type_substitute(type->u.func.ret, genv);
+            return (clape_type_t){
+                .tag = CLAPE_TYPE_FUNC,
+                .u.func = {.param = param, .ret = ret},
+            };
+        }
+        default:
+            return clape_type_clone(type);
     }
 }
 
@@ -3127,6 +3332,20 @@ static clape_type_t clape_type_clone(const clape_type_t *const type) {
                 .u.func = {.param = param, .ret = ret},
             };
         }
+        case CLAPE_TYPE_LIST:
+            if (type->u.element) {
+                clape_type_t *const inner = malloc(sizeof(clape_type_t));
+                *inner = clape_type_clone(type->u.element);
+                return (clape_type_t){.tag = CLAPE_TYPE_LIST, .u.element = inner};
+            }
+            return (clape_type_t){.tag = CLAPE_TYPE_LIST, .u.element = NULL};
+
+        case CLAPE_TYPE_GENERIC:
+            return (clape_type_t){
+                .tag = CLAPE_TYPE_GENERIC,
+                .u.generic = strdup(type->u.generic),
+            };
+
         default:
             return (clape_type_t){.tag = type->tag};
     }
@@ -3166,6 +3385,15 @@ static void clape_free_type(clape_type_t *const type) {
             clape_free_type(type->u.func.ret);
             free(type->u.func.ret);
             break;
+        case CLAPE_TYPE_LIST:
+            if (type->u.element) {
+                clape_free_type(type->u.element);
+                free(type->u.element);
+            }
+            break;
+        case CLAPE_TYPE_GENERIC:
+            free(type->u.generic);
+            break;
         default:
             break;
     }
@@ -3203,6 +3431,12 @@ static void clape_free_expr(clape_expr_t *expr) {
             }
             free(expr->u.lambda.params);
             clape_free_type(&expr->u.lambda.return_type);
+            if (expr->u.lambda.generic_params != NULL) {
+                for (size_t i = 0; i < expr->u.lambda.generic_params->len; i++) {
+                    free(*ACCESS_ARR_AT(char *, expr->u.lambda.generic_params, i));
+                }
+                free(expr->u.lambda.generic_params);
+            }
             clape_free_expr(expr->u.lambda.body);
             free(expr->u.lambda.body);
             break;
@@ -3326,7 +3560,7 @@ void clape_free_program(clape_program_t *const program) {
         return;
     }
     for (size_t i = 0; i < program->statements->len; i++) {
-        clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
+        clape_stmt_t *const stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
         if (stmt->tag == CLAPE_STMT_LET) {
             free(stmt->u.let.name);
             clape_free_expr(&stmt->u.let.expr);
@@ -3470,12 +3704,40 @@ static const char *clape_type_tag_name(clape_type_e tag) {
             return "Product";
         case CLAPE_TYPE_SUM:
             return "Sum";
+        case CLAPE_TYPE_GENERIC:
+            return "Generic";
     }
     return "Unknown";
 }
 
-static bool clape_type_is_compatible(const clape_value_t *value, const clape_type_t *type) {
+static const clape_generic_binding_t *clape_find_generic( //
+    const clape_generic_binding_t *genv,                  //
+    const char *name                                      //
+) {
+    for (; genv; genv = genv->next) {
+        if (strcmp(genv->name, name) == 0) {
+            return genv;
+        }
+    }
+    return NULL;
+}
+
+static bool clape_type_is_compatible( //
+    const clape_value_t *value,       //
+    const clape_type_t *type,         //
+    clape_generic_binding_t **genv    //
+) {
     switch (type->tag) {
+        case CLAPE_TYPE_GENERIC: {
+            const clape_generic_binding_t *b =
+                *genv ? clape_find_generic(*genv, type->u.generic) : NULL;
+            if (b) {
+                return clape_type_is_compatible(value, &b->type, genv);
+            }
+            // Lazily infer: bind generic to the value's concrete type
+            *genv = clape_genv_prepend(*genv, type->u.generic, clape_type_clone(&value->type));
+            return true;
+        }
         case CLAPE_TYPE_INT:
         case CLAPE_TYPE_FLOAT:
         case CLAPE_TYPE_BOOL:
@@ -3501,7 +3763,7 @@ static bool clape_type_is_compatible(const clape_value_t *value, const clape_typ
                         clape_product_value_t, value->u.product, j      //
                     );
                     if (strcmp(field->name, declared->name) == 0) {
-                        if (!clape_type_is_compatible(&field->value, &declared->type)) {
+                        if (!clape_type_is_compatible(&field->value, &declared->type, genv)) {
                             return false;
                         }
                         found = true;
@@ -3526,7 +3788,7 @@ static bool clape_type_is_compatible(const clape_value_t *value, const clape_typ
                     continue;
                 }
                 if (variant->has_type && value->u.sum.value) {
-                    return clape_type_is_compatible(value->u.sum.value, &variant->type);
+                    return clape_type_is_compatible(value->u.sum.value, &variant->type, genv);
                 }
                 return variant->has_type == (value->u.sum.value != NULL);
             }
@@ -3534,6 +3796,98 @@ static bool clape_type_is_compatible(const clape_value_t *value, const clape_typ
         }
     }
     return false;
+}
+
+static clape_generic_binding_t *clape_genv_prepend( //
+    clape_generic_binding_t *genv,                  //
+    const char *name,                               //
+    clape_type_t type                               //
+) {
+    clape_generic_binding_t *const binding = malloc(sizeof(clape_generic_binding_t));
+    binding->name = strdup(name);
+    binding->type = type;
+    binding->next = genv;
+    return binding;
+}
+
+static void clape_genv_free(clape_generic_binding_t *genv) {
+    while (genv != NULL) {
+        clape_generic_binding_t *const next = genv->next;
+        free(genv->name);
+        clape_free_type(&genv->type);
+        free(genv);
+        genv = next;
+    }
+}
+
+static clape_generic_binding_t *clape_infer_generic_types( //
+    const clape_type_t *declared,                          //
+    const clape_value_t *value,                            //
+    clape_generic_binding_t *genv                          //
+) {
+    switch (declared->tag) {
+        case CLAPE_TYPE_GENERIC: {
+            const clape_generic_binding_t *existing = clape_find_generic(genv, declared->u.generic);
+            if (existing != NULL) {
+                if (!clape_type_is_compatible(value, &existing->type, &genv)) {
+                    fprintf(stderr, "Type error: conflicting generic inference for '%s'\n",
+                        declared->u.generic);
+                    exit(1);
+                }
+                return genv;
+            }
+            return clape_genv_prepend(genv, declared->u.generic, clape_type_clone(&value->type));
+        }
+        case CLAPE_TYPE_PRODUCT: {
+            if (value->type.tag != CLAPE_TYPE_PRODUCT) {
+                return genv;
+            }
+            for (size_t i = 0; i < declared->u.product.fields->len; i++) {
+                clape_product_field_t *const field = ACCESS_ARR_AT(      //
+                    clape_product_field_t, declared->u.product.fields, i //
+                );
+                for (size_t j = 0; j < value->u.product->len; j++) {
+                    clape_product_value_t *const field_value = ACCESS_ARR_AT( //
+                        clape_product_value_t, value->u.product, j            //
+                    );
+                    if (strcmp(field_value->name, field->name) == 0) {
+                        genv = clape_infer_generic_types(&field->type, &field_value->value, genv);
+                        break;
+                    }
+                }
+            }
+            return genv;
+        }
+        case CLAPE_TYPE_SUM: {
+            if (value->type.tag != CLAPE_TYPE_SUM) {
+                return genv;
+            }
+            for (size_t i = 0; i < declared->u.sum.variants->len; i++) {
+                clape_sum_variant_t *const variant = ACCESS_ARR_AT(  //
+                    clape_sum_variant_t, declared->u.sum.variants, i //
+                );
+                if (strcmp(variant->name, value->u.sum.constructor) != 0) {
+                    continue;
+                }
+                if (variant->has_type && value->u.sum.value) {
+                    return clape_infer_generic_types(&variant->type, value->u.sum.value, genv);
+                }
+                return genv;
+            }
+            return genv;
+        }
+        case CLAPE_TYPE_LIST: {
+            if (value->type.tag != CLAPE_TYPE_LIST) {
+                return genv;
+            }
+            for (clape_cons_t *n = value->u.list; n; n = n->tail) {
+                genv = clape_infer_generic_types(declared, &n->head, genv);
+            }
+            return genv;
+        }
+        default:
+            return genv;
+    }
 }
 
 static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
@@ -3816,6 +4170,8 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                 .builtin_fn = NULL,
                 .next_param_index = 0,
                 .closure = env,
+                .generic_params = expr->u.lambda.generic_params,
+                .genv = NULL,
             };
             return (clape_value_t){
                 .type = {.tag = CLAPE_TYPE_FUNC},
@@ -3928,9 +4284,13 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             const size_t idx = fn->next_param_index;
             clape_param_t *const param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
 
-            if (!clape_type_is_compatible(&arg, &param->type)) {
+            clape_generic_binding_t *genv = fn->genv;
+            genv = clape_infer_generic_types(&param->type, &arg, genv);
+
+            if (!clape_type_is_compatible(&arg, &param->type, &genv)) {
                 fprintf(stderr, "Type error: parameter '%s' expected %s, got %s\n", param->name,
                     clape_type_tag_name(param->type.tag), clape_type_tag_name(arg.type.tag));
+                clape_genv_free(genv);
                 exit(1);
             }
 
@@ -3942,13 +4302,15 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             };
 
             if (idx + 1 == fn->params->len) {
-                clape_value_t result = clape_eval(fn->body, new_closure);
-                if (!clape_type_is_compatible(&result, &fn->return_type)) {
+                const clape_value_t result = clape_eval(fn->body, new_closure);
+                if (!clape_type_is_compatible(&result, &fn->return_type, &genv)) {
                     fprintf(stderr, "Type error: function returned %s, expected %s\n",
                         clape_type_tag_name(result.type.tag),
                         clape_type_tag_name(fn->return_type.tag));
+                    clape_genv_free(genv);
                     exit(1);
                 }
+                clape_genv_free(genv);
                 return result;
             }
             clape_fn_t *const partial = malloc(sizeof(clape_fn_t));
@@ -3960,6 +4322,8 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                 .builtin_fn = NULL,
                 .next_param_index = idx + 1,
                 .closure = new_closure,
+                .generic_params = NULL,
+                .genv = genv,
             };
             return (clape_value_t){
                 .type = {.tag = CLAPE_TYPE_FUNC},
@@ -3970,141 +4334,78 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
     return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
 
-static clape_value_t clape_builtin_print(clape_value_t arg) {
-    switch (arg.type.tag) {
+static void clape_print_value_inner(clape_value_t v) {
+    switch (v.type.tag) {
         case CLAPE_TYPE_INT:
-            printf("%li\n", arg.u.ival);
+            printf("%li", v.u.ival);
             break;
         case CLAPE_TYPE_FLOAT:
-            printf("%g\n", arg.u.fval);
+            printf("%g", v.u.fval);
             break;
         case CLAPE_TYPE_BOOL:
-            printf("%s\n", arg.u.bval ? "true" : "false");
-            break;
-        case CLAPE_TYPE_UNIT:
-            printf("Unit\n");
-            break;
-        case CLAPE_TYPE_FUNC:
-            printf("<function>\n");
-            break;
-        case CLAPE_TYPE_STRING:
-            printf("%s\n", arg.u.sval);
+            printf("%s", v.u.bval ? "true" : "false");
             break;
         case CLAPE_TYPE_CHAR:
-            printf("%c\n", arg.u.cval);
+            printf("'%c'", v.u.cval);
+            break;
+        case CLAPE_TYPE_STRING:
+            printf("\"%s\"", v.u.sval);
+            break;
+        case CLAPE_TYPE_UNIT:
+            printf("Unit");
+            break;
+        case CLAPE_TYPE_FUNC:
+            printf("<function>");
+            break;
+        case CLAPE_TYPE_GENERIC:
+            printf("<generic>");
             break;
         case CLAPE_TYPE_LIST: {
             printf("[");
             bool first = true;
-            for (clape_cons_t *node = arg.u.list; node; node = node->tail) {
+            for (clape_cons_t *node = v.u.list; node; node = node->tail) {
                 if (!first) {
                     printf(", ");
                 }
                 first = false;
-                clape_value_t elem = node->head;
-                switch (elem.type.tag) {
-                    case CLAPE_TYPE_INT:
-                        printf("%li", elem.u.ival);
-                        break;
-                    case CLAPE_TYPE_FLOAT:
-                        printf("%g", elem.u.fval);
-                        break;
-                    case CLAPE_TYPE_BOOL:
-                        printf("%s", elem.u.bval ? "true" : "false");
-                        break;
-                    case CLAPE_TYPE_CHAR:
-                        printf("'%c'", elem.u.cval);
-                        break;
-                    case CLAPE_TYPE_STRING:
-                        printf("\"%s\"", elem.u.sval);
-                        break;
-                    case CLAPE_TYPE_LIST:
-                        printf("[...]");
-                        break;
-                    default:
-                        printf("<value>");
-                        break;
-                }
+                clape_print_value_inner(node->head);
             }
-            printf("]\n");
+            printf("]");
             break;
         }
         case CLAPE_TYPE_PRODUCT: {
-            for (size_t i = 0; i < arg.u.product->len; i++) {
+            for (size_t i = 0; i < v.u.product->len; i++) {
                 if (i > 0) {
                     printf(" & ");
                 }
-                clape_product_value_t *f = ACCESS_ARR_AT(clape_product_value_t, arg.u.product, i);
+                clape_product_value_t *f = ACCESS_ARR_AT(clape_product_value_t, v.u.product, i);
                 printf(".%s(", f->name);
-                clape_value_t fv = f->value;
-                switch (fv.type.tag) {
-                    case CLAPE_TYPE_INT:
-                        printf("%li", fv.u.ival);
-                        break;
-                    case CLAPE_TYPE_FLOAT:
-                        printf("%g", fv.u.fval);
-                        break;
-                    case CLAPE_TYPE_BOOL:
-                        printf("%s", fv.u.bval ? "true" : "false");
-                        break;
-                    case CLAPE_TYPE_STRING:
-                        printf("\"%s\"", fv.u.sval);
-                        break;
-                    case CLAPE_TYPE_CHAR:
-                        printf("'%c'", fv.u.cval);
-                        break;
-                    default:
-                        printf("<value>");
-                        break;
-                }
+                clape_print_value_inner(f->value);
                 printf(")");
             }
-            printf("\n");
             break;
         }
         case CLAPE_TYPE_SUM: {
-            printf(".%s", arg.u.sum.constructor);
-            if (arg.u.sum.value) {
+            printf(".%s", v.u.sum.constructor);
+            if (v.u.sum.value) {
                 printf("(");
-                const clape_value_t sum_value = *arg.u.sum.value;
-                switch (sum_value.type.tag) {
-                    case CLAPE_TYPE_INT:
-                        printf("%li", sum_value.u.ival);
-                        break;
-                    case CLAPE_TYPE_FLOAT:
-                        printf("%g", sum_value.u.fval);
-                        break;
-                    case CLAPE_TYPE_BOOL:
-                        printf("%s", sum_value.u.bval ? "true" : "false");
-                        break;
-                    case CLAPE_TYPE_STRING:
-                        printf("\"%s\"", sum_value.u.sval);
-                        break;
-                    case CLAPE_TYPE_CHAR:
-                        printf("'%c'", sum_value.u.cval);
-                        break;
-                    case CLAPE_TYPE_LIST:
-                        printf("[...]");
-                        break;
-                    case CLAPE_TYPE_PRODUCT:
-                        printf("<product>");
-                        break;
-                    default:
-                        printf("<value>");
-                        break;
-                }
+                clape_print_value_inner(*v.u.sum.value);
                 printf(")");
             }
-            printf("\n");
             break;
         }
     }
+}
+
+static clape_value_t clape_builtin_print(clape_value_t arg) {
+    clape_print_value_inner(arg);
+    printf("\n");
     return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
 
 static void clape_free_list_value(clape_cons_t *list) {
-    while (list) {
-        clape_cons_t *next = list->tail;
+    while (list != NULL) {
+        clape_cons_t *const next = list->tail;
         if (--list->arc == 0) {
             if (list->head.type.tag == CLAPE_TYPE_STRING) {
                 free(list->head.u.sval);
@@ -4118,8 +4419,8 @@ static void clape_free_list_value(clape_cons_t *list) {
 }
 
 static void clape_env_free(clape_env_t *env) {
-    while (env) {
-        clape_env_t *next = env->next;
+    while (env != NULL) {
+        clape_env_t *const next = env->next;
         free(env->name);
         if (env->value.type.tag == CLAPE_TYPE_FUNC) {
             free(env->value.u.fn);
@@ -4175,7 +4476,6 @@ void clape_interpret(clape_program_t *const program) {
                     break;
                 }
                 if (strcmp(stmt->u.let.name, "_") == 0) {
-                    // Discard result for side-effect calls
                     break;
                 }
                 clape_env_t *const binding = malloc(sizeof(clape_env_t));
