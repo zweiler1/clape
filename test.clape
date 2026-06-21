@@ -16,7 +16,7 @@ let _ = print {get_first [1, 2, 3]}
 let _ = print {get_first ["Hi", "There"]}
 
 
-let _ = print '\n'
+let _ = print {}
 let _ = print "--- Result<T, E> ---"
 
 let Result<T, E> = Ok(T) | Err(E)
@@ -33,7 +33,7 @@ let _ = print {div 10 2}
 let _ = print {div 10 0}
 
 
-let _ = print '\n'
+let _ = print {}
 let _ = print "--- Pair<T, U> ---"
 
 let Pair<T, U> = first(T) & second(U)
@@ -46,7 +46,7 @@ let _ = print {pack 10 "Wohoo"}
 let _ = print {pack 'A' 3.14}
 
 
-let _ = print '\n'
+let _ = print {}
 let _ = print "--- Map<K, V> ---"
 
 let Map<K, V> = [key(K) & value(V)]

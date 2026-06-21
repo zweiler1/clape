@@ -4334,7 +4334,7 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
     return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
 
-static void clape_print_value_inner(clape_value_t v) {
+static void clape_print_value_inner(clape_value_t v, int depth) {
     switch (v.type.tag) {
         case CLAPE_TYPE_INT:
             printf("%li", v.u.ival);
@@ -4346,13 +4346,24 @@ static void clape_print_value_inner(clape_value_t v) {
             printf("%s", v.u.bval ? "true" : "false");
             break;
         case CLAPE_TYPE_CHAR:
-            printf("'%c'", v.u.cval);
+            if (depth == 0) {
+                printf("%c", v.u.cval);
+            } else {
+                printf("'%c'", v.u.cval);
+            }
             break;
         case CLAPE_TYPE_STRING:
-            printf("\"%s\"", v.u.sval);
+            if (depth == 0) {
+                printf("%s", v.u.sval);
+            } else {
+                printf("\"%s\"", v.u.sval);
+            }
             break;
         case CLAPE_TYPE_UNIT:
-            printf("Unit");
+            if (depth > 0) {
+                // Print nothing, used for printing empty lines
+                printf("Unit");
+            }
             break;
         case CLAPE_TYPE_FUNC:
             printf("<function>");
@@ -4368,7 +4379,7 @@ static void clape_print_value_inner(clape_value_t v) {
                     printf(", ");
                 }
                 first = false;
-                clape_print_value_inner(node->head);
+                clape_print_value_inner(node->head, depth + 1);
             }
             printf("]");
             break;
@@ -4380,7 +4391,7 @@ static void clape_print_value_inner(clape_value_t v) {
                 }
                 clape_product_value_t *f = ACCESS_ARR_AT(clape_product_value_t, v.u.product, i);
                 printf(".%s(", f->name);
-                clape_print_value_inner(f->value);
+                clape_print_value_inner(f->value, depth + 1);
                 printf(")");
             }
             break;
@@ -4389,7 +4400,7 @@ static void clape_print_value_inner(clape_value_t v) {
             printf(".%s", v.u.sum.constructor);
             if (v.u.sum.value) {
                 printf("(");
-                clape_print_value_inner(*v.u.sum.value);
+                clape_print_value_inner(*v.u.sum.value, depth + 1);
                 printf(")");
             }
             break;
@@ -4398,7 +4409,7 @@ static void clape_print_value_inner(clape_value_t v) {
 }
 
 static clape_value_t clape_builtin_print(clape_value_t arg) {
-    clape_print_value_inner(arg);
+    clape_print_value_inner(arg, 0);
     printf("\n");
     return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
