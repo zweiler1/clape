@@ -740,14 +740,9 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         }
 
         if (*p == '\0') {
-            // EOF
             token_t t = {.tag = TOK_EOF};
             clape_arr_append(sizeof(token_t), &tokens, &t);
-            if (*p == '\n') {
-                p++;
-            } else {
-                p = NULL;
-            }
+            p = NULL;
             continue;
         }
 
@@ -1151,12 +1146,6 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         // Unknown character → error (for now just skip or handle later)
         fprintf(stderr, "Unknown character: '%c'\n", *p);
         return NULL;
-    }
-
-    // Add final EOF if not already present
-    if (ACCESS_ARR_AT(token_t, tokens, tokens->len - 1)->tag != TOK_EOF) {
-        token_t eof = {.tag = TOK_EOF};
-        clape_arr_append(sizeof(token_t), &tokens, &eof);
     }
 
     return tokens;
