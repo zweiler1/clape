@@ -658,6 +658,14 @@ typedef struct token_t {
     /// @brief The tag telling us which type of token this is
     token_type_e tag;
 
+    /// @var `line`
+    /// @brief The line number where this token appears (1-indexed)
+    uint32_t line;
+
+    /// @var `column`
+    /// @brief The column number where this token starts (0-indexed)
+    uint32_t column;
+
     /// @var `u`
     /// @brief A union of all possible value types
     union {
@@ -732,15 +740,31 @@ clape_arr_t *clape_tokenize(char *const file_content) {
     }
 
     char *p = file_content;
+    uint32_t current_line = 1;
+    uint32_t current_column = 0;
+
+    // Helper macro to record token position before advancing
+#define RECORD_TOKEN_POS(t)                                                                        \
+    do {                                                                                           \
+        (t).line = current_line;                                                                   \
+        (t).column = current_column;                                                               \
+    } while (0)
 
     while (p != NULL) {
         // Skip whitespace
         while (is_whitespace(*p) || *p == '\n') {
+            if (*p == '\n') {
+                current_line++;
+                current_column = 0;
+            } else {
+                current_column++;
+            }
             p++;
         }
 
         if (*p == '\0') {
             token_t t = {.tag = TOK_EOF};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p = NULL;
             continue;
@@ -748,19 +772,24 @@ clape_arr_t *clape_tokenize(char *const file_content) {
 
         if (strncmp(p, "let", 3) == 0 && !isalnum(p[3])) {
             token_t t = {.tag = TOK_LET};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 3;
+            current_column += 3;
             continue;
         }
 
         if (strncmp(p, "use", 3) == 0 && !isalnum(p[3])) {
             token_t t = {.tag = TOK_USE};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 3;
+            current_column += 3;
             continue;
         }
 
         if (is_digit(*p)) {
+            char *start = p;
             int64_t ival = 0;
             while (is_digit(*p)) {
                 ival = ival * 10 + (*p - '0');
@@ -776,108 +805,141 @@ clape_arr_t *clape_tokenize(char *const file_content) {
                     p++;
                 }
                 token_t t = {.tag = TOK_FLOAT, .u.fval = fval};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
+                current_column += (p - start);
             } else {
                 token_t t = {.tag = TOK_INT, .u.ival = ival};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
+                current_column += (p - start);
             }
             continue;
         }
 
         if (strncmp(p, "true", 4) == 0 && !isalnum(p[4])) {
             token_t t = {.tag = TOK_TRUE};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 4;
+            current_column += 4;
             continue;
         }
 
         if (strncmp(p, "false", 5) == 0 && !isalnum(p[5])) {
             token_t t = {.tag = TOK_FALSE};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 5;
+            current_column += 5;
             continue;
         }
 
         if (strncmp(p, "and", 3) == 0 && !isalnum(p[3])) {
             token_t t = {.tag = TOK_AND};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 3;
+            current_column += 3;
             continue;
         }
 
         if (strncmp(p, "or", 2) == 0 && !isalnum(p[2])) {
             token_t t = {.tag = TOK_OR};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 2;
+            current_column += 2;
             continue;
         }
 
         if (strncmp(p, "not", 3) == 0 && !isalnum(p[3])) {
             token_t t = {.tag = TOK_NOT};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 3;
+            current_column += 3;
             continue;
         }
 
         if (strncmp(p, "match", 5) == 0 && !isalnum(p[5])) {
             token_t t = {.tag = TOK_MATCH};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 5;
+            current_column += 5;
             continue;
         }
 
         if (strncmp(p, "if", 2) == 0 && !isalnum(p[2])) {
             token_t t = {.tag = TOK_IF};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 2;
+            current_column += 2;
             continue;
         }
 
         if (strncmp(p, "else", 4) == 0 && !isalnum(p[4])) {
             token_t t = {.tag = TOK_ELSE};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 4;
+            current_column += 4;
             continue;
         }
 
         if (strncmp(p, "Int", 3) == 0 && !isalnum(p[3])) {
             token_t t = {.tag = TOK_TYPE_INT};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 3;
+            current_column += 3;
             continue;
         }
         if (strncmp(p, "Float", 5) == 0 && !isalnum(p[5])) {
             token_t t = {.tag = TOK_TYPE_FLOAT};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 5;
+            current_column += 5;
             continue;
         }
         if (strncmp(p, "Bool", 4) == 0 && !isalnum(p[4])) {
             token_t t = {.tag = TOK_TYPE_BOOL};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 4;
+            current_column += 4;
             continue;
         }
         if (strncmp(p, "String", 6) == 0 && !isalnum(p[6])) {
             token_t t = {.tag = TOK_TYPE_STRING};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 6;
+            current_column += 6;
             continue;
         }
         if (strncmp(p, "Char", 4) == 0 && !isalnum(p[4])) {
             token_t t = {.tag = TOK_TYPE_CHAR};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 4;
+            current_column += 4;
             continue;
         }
         if (strncmp(p, "Unit", 4) == 0 && !isalnum(p[4])) {
             token_t t = {.tag = TOK_TYPE_UNIT};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p += 4;
+            current_column += 4;
             continue;
         }
 
         if (*p == '"') {
+            char *start = p;
             p++;
             clape_arr_t *str = clape_arr_create(1, 0);
             while (*p && *p != '"') {
@@ -921,11 +983,14 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             s[str->len] = '\0';
             free(str);
             token_t t = {.tag = TOK_STRING, .u.string = s};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
+            current_column += (p - start);
             continue;
         }
 
         if (*p == '\'') {
+            char *start = p;
             p++;
             char c;
             if (*p == '\\') {
@@ -956,7 +1021,9 @@ clape_arr_t *clape_tokenize(char *const file_content) {
                 p++;
             }
             token_t t = {.tag = TOK_CHAR, .u.cval = c};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
+            current_column += (p - start);
             continue;
         }
 
@@ -971,55 +1038,73 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             ident[len] = '\0';
 
             token_t t = {.tag = TOK_IDENTIFIER, .u.identifier = ident};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
+            current_column += len;
             continue;
         }
 
         if (*p == '=') {
             if (*(p + 1) == '=') {
                 token_t t = {.tag = TOK_EQ_EQ};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p += 2;
+                current_column += 2;
             } else if (*(p + 1) == '>') {
                 token_t t = {.tag = TOK_FAT_ARROW};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p += 2;
+                current_column += 2;
             } else {
                 token_t t = {.tag = TOK_EQ};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p++;
+                current_column++;
             }
             continue;
         }
         if (*p == '<') {
             if (*(p + 1) == '=') {
                 token_t t = {.tag = TOK_LE};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p += 2;
+                current_column += 2;
             } else {
                 token_t t = {.tag = TOK_LT};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p++;
+                current_column++;
             }
             continue;
         }
         if (*p == '>') {
             if (*(p + 1) == '=') {
                 token_t t = {.tag = TOK_GE};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p += 2;
+                current_column += 2;
             } else {
                 token_t t = {.tag = TOK_GT};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p++;
+                current_column++;
             }
             continue;
         }
         if (*p == '!') {
             if (*(p + 1) == '=') {
                 token_t t = {.tag = TOK_NE};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p += 2;
+                current_column += 2;
             } else {
                 fprintf(stderr, "Expected '=' after '!'\n");
                 return NULL;
@@ -1028,86 +1113,114 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         }
         if (*p == '+') {
             token_t t = {.tag = TOK_PLUS};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '-') {
             if (*(p + 1) == '>') {
                 token_t t = {.tag = TOK_ARROW};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p += 2;
+                current_column += 2;
             } else {
                 token_t t = {.tag = TOK_MINUS};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p++;
+                current_column++;
             }
             continue;
         }
         if (*p == '*') {
             token_t t = {.tag = TOK_MUL};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '/') {
             token_t t = {.tag = TOK_DIV};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '(') {
             token_t t = {.tag = TOK_LPAREN};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == ')') {
             token_t t = {.tag = TOK_RPAREN};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '{') {
             token_t t = {.tag = TOK_LBRACE};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '}') {
             token_t t = {.tag = TOK_RBRACE};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '[') {
             token_t t = {.tag = TOK_LBRACKET};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == ']') {
             token_t t = {.tag = TOK_RBRACKET};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '.') {
             token_t t = {.tag = TOK_DOT};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '&') {
             token_t t = {.tag = TOK_AMP};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '|') {
             token_t t = {.tag = TOK_PIPE};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == '#') {
@@ -1121,25 +1234,33 @@ clape_arr_t *clape_tokenize(char *const file_content) {
         if (*p == ':') {
             if (*(p + 1) == ':') {
                 token_t t = {.tag = TOK_CONS};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p += 2;
+                current_column += 2;
             } else {
                 token_t t = {.tag = TOK_COLON};
+                RECORD_TOKEN_POS(t);
                 clape_arr_append(sizeof(token_t), &tokens, &t);
                 p++;
+                current_column++;
             }
             continue;
         }
         if (*p == ',') {
             token_t t = {.tag = TOK_COMMA};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
         if (*p == ';') {
             token_t t = {.tag = TOK_SEMICOLON};
+            RECORD_TOKEN_POS(t);
             clape_arr_append(sizeof(token_t), &tokens, &t);
             p++;
+            current_column++;
             continue;
         }
 
@@ -1361,6 +1482,24 @@ void clape_free_tokens(clape_arr_t *const tokens) {
         }
     }
     free(tokens);
+}
+
+static void throw_err(          //
+    FILE *const stream,         //
+    const char *const msg,      //
+    const token_t *const token, //
+    const bool print_token      //
+) {
+    if (token != NULL) {
+        fprintf(stream, "Error: %u:%u: %s", token->line, token->column, msg);
+        if (print_token) {
+            clape_print_token(stream, token);
+        }
+        fprintf(stream, "\n");
+    } else {
+        fprintf(stream, "Error: %s\n", msg);
+    }
+    exit(1);
 }
 
 #endif
@@ -2248,9 +2387,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             break;
         }
         default:
-            fprintf(stderr, "Unexpected token in expression: ");
-            clape_print_token(stderr, tok);
-            fprintf(stderr, "\n");
+            throw_err(stderr, "Unexpected token in expression: ", tok, true);
             exit(1);
     }
 
@@ -2664,9 +2801,9 @@ bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
     clape_parser_t p = {.tokens = tokens, .pos = 0};
     program->statements = clape_arr_create(sizeof(clape_stmt_t), 0);
     while (clape_peek(&p)->tag != TOK_EOF) {
-        token_type_e t = clape_peek(&p)->tag;
-        if (t != TOK_LET && t != TOK_USE) {
-            fprintf(stderr, "Expected 'let' or 'use' at start of statement\n");
+        token_t *const tok = clape_peek(&p);
+        if (tok->tag != TOK_LET && tok->tag != TOK_USE) {
+            throw_err(stderr, "Expected 'let' or 'use' at start of statement, got: ", tok, true);
             return false;
         }
         clape_stmt_t stmt = clape_parse_stmt(&p);
