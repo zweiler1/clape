@@ -1,4 +1,18 @@
 use Print
+use File
+
+let print_list<T> = (list: [T]) -> Unit {
+    match list {
+        [] => {};
+        head :: tail => {
+            let _ = print head;
+            print_list tail
+        }
+    }
+}
+let lines = load_file "test.clape"
+let _ = print_list lines
+
 
 let _ = {
     let _ = print "--- Option<T> ---"

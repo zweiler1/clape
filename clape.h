@@ -4486,6 +4486,57 @@ static clape_value_t clape_builtin_print(clape_value_t arg) {
     return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
 
+static clape_value_t clape_builtin_load_file(clape_value_t arg) {
+    clape_type_t *const string_type = (clape_type_t *)malloc(sizeof(clape_type_t));
+    *string_type = (clape_type_t){.tag = CLAPE_TYPE_STRING};
+    const clape_type_t return_type = (clape_type_t){
+        .tag = CLAPE_TYPE_LIST,
+        .u.element = string_type,
+    };
+    if (arg.type.tag != CLAPE_TYPE_STRING) {
+        throw_err(stderr, "File path not of type 'String'", NULL, false);
+        return (clape_value_t){.type = return_type, .u.list = NULL};
+    }
+    char *const file_path = arg.u.sval;
+    if (!is_valid_file_path(file_path)) {
+        throw_err(stderr, "File path does not exist", NULL, false);
+        return (clape_value_t){.type = return_type, .u.list = NULL};
+    }
+    char *const loaded_file = load_file(file_path);
+    defer(free, loaded_file);
+    clape_cons_t *list_values = NULL;
+    char *start = loaded_file;
+    char *end = loaded_file;
+
+    while (true) {
+        if (*end == '\n' || *end == '\0') {
+            const size_t len = end - start;
+            char *sval = NULL;
+            sval = (char *)malloc(len + 1);
+            if (len > 0) {
+                memcpy(sval, start, len);
+            }
+            sval[len] = '\0';
+            clape_cons_t **last_value = &list_values;
+            while (*last_value != NULL) {
+                last_value = &(*last_value)->tail;
+            }
+            *last_value = (clape_cons_t *)malloc(sizeof(clape_cons_t));
+            **last_value = (clape_cons_t){
+                .arc = 1,
+                .head = {.type = {.tag = CLAPE_TYPE_STRING}, .u.sval = sval},
+                .tail = NULL,
+            };
+            start = end + 1;
+        }
+        if (*end == '\0') {
+            break;
+        }
+        end++;
+    }
+    return (clape_value_t){.type = return_type, .u.list = list_values};
+}
+
 static void clape_free_list_value(clape_cons_t *list) {
     while (list != NULL) {
         clape_cons_t *const next = list->tail;
@@ -4583,32 +4634,61 @@ void clape_interpret(clape_program_t *const program) {
             }
             case CLAPE_STMT_USE: {
                 // Use statement
-                if (strcmp(stmt->u.use.module, "Print") != 0) {
-                    fprintf(stderr, "Unknown module: %s\n", stmt->u.use.module);
-                    exit(1);
+                if (strcmp(stmt->u.use.module, "Print") == 0) {
+                    clape_fn_t *const print_fn = malloc(sizeof(clape_fn_t));
+                    *print_fn = (clape_fn_t){
+                        .is_builtin = true,
+                        .params = NULL,
+                        .return_type = {.tag = CLAPE_TYPE_UNIT},
+                        .body = NULL,
+                        .builtin_fn = clape_builtin_print,
+                        .next_param_index = 0,
+                        .closure = NULL,
+                    };
+                    clape_env_t *const binding = malloc(sizeof(clape_env_t));
+                    *binding = (clape_env_t){
+                        .name = strdup("print"),
+                        .value =
+                            (clape_value_t){
+                                .type = {.tag = CLAPE_TYPE_FUNC},
+                                .u.fn = print_fn,
+                            },
+                        .next = env,
+                    };
+                    env = binding;
+                    break;
+                } else if (strcmp(stmt->u.use.module, "File") == 0) {
+                    clape_fn_t *const load_file_fn = malloc(sizeof(clape_fn_t));
+                    clape_type_t *const string_type = (clape_type_t *)malloc(sizeof(clape_type_t));
+                    *string_type = (clape_type_t){.tag = CLAPE_TYPE_STRING};
+                    const clape_type_t return_type = (clape_type_t){
+                        .tag = CLAPE_TYPE_LIST,
+                        .u.element = string_type,
+                    };
+                    *load_file_fn = (clape_fn_t){
+                        .is_builtin = true,
+                        .params = NULL,
+                        .return_type = return_type,
+                        .body = NULL,
+                        .builtin_fn = clape_builtin_load_file,
+                        .next_param_index = 0,
+                        .closure = NULL,
+                    };
+                    clape_env_t *const binding = malloc(sizeof(clape_env_t));
+                    *binding = (clape_env_t){
+                        .name = strdup("load_file"),
+                        .value =
+                            (clape_value_t){
+                                .type = {.tag = CLAPE_TYPE_FUNC},
+                                .u.fn = load_file_fn,
+                            },
+                        .next = env,
+                    };
+                    env = binding;
+                    break;
                 }
-                clape_fn_t *const print_fn = malloc(sizeof(clape_fn_t));
-                *print_fn = (clape_fn_t){
-                    .is_builtin = true,
-                    .params = NULL,
-                    .return_type = {.tag = CLAPE_TYPE_UNIT},
-                    .body = NULL,
-                    .builtin_fn = clape_builtin_print,
-                    .next_param_index = 0,
-                    .closure = NULL,
-                };
-                clape_env_t *const binding = malloc(sizeof(clape_env_t));
-                *binding = (clape_env_t){
-                    .name = strdup("print"),
-                    .value =
-                        (clape_value_t){
-                            .type = {.tag = CLAPE_TYPE_FUNC},
-                            .u.fn = print_fn,
-                        },
-                    .next = env,
-                };
-                env = binding;
-                break;
+                fprintf(stderr, "Unknown module: %s\n", stmt->u.use.module);
+                exit(1);
             }
         }
     }
