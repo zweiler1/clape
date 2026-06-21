@@ -1670,14 +1670,17 @@ check_amp:
                 free(dest->name);
                 clape_free_type(&dest->type);
                 dest->name = strdup(src->name);
-                dest->type = src->type;
+                dest->type = clape_type_clone(&src->type);
                 found = true;
                 break;
             }
             if (found) {
                 continue;
             }
-            clape_product_field_t field = {.name = strdup(src->name), .type = src->type};
+            clape_product_field_t field = {
+                .name = strdup(src->name),
+                .type = clape_type_clone(&src->type),
+            };
             clape_arr_append(sizeof(clape_product_field_t), &result.u.product.fields, &field);
         }
         if (rhs.u.product.fields != NULL) {
@@ -2433,7 +2436,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                                     free(dest->name);
                                     clape_free_type(&dest->type);
                                     dest->name = strdup(src->name);
-                                    dest->type = src->type;
+                                    dest->type = clape_type_clone(&src->type);
                                     found = true;
                                     break;
                                 }
@@ -2446,7 +2449,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                             }
                             clape_product_field_t field = {
                                 .name = strdup(src->name),
-                                .type = src->type,
+                                .type = clape_type_clone(&src->type),
                             };
                             clape_arr_append(sizeof(clape_product_field_t), &combined, &field);
                         }
