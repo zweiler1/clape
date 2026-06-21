@@ -343,7 +343,7 @@ use Print
 
 let Option<T> = Some(T) | None
 
-let get_first<T> (list: [T]) -> Option<T> {
+let get_first<T> = (list: [T]) -> Option<T> {
     match list {
         [] => .None;
         head :: tail => .Some(head)
@@ -374,7 +374,7 @@ let Result<T, E> = Ok(T) | Err(E)
 
 let div = (x: Int, y: Int) -> Result<Int, String> {
     {
-        .Ok(x / y) 
+        .Ok(x / y)
     } if y != 0 else {
         .Err("Division by zero detected")
     }
@@ -432,7 +432,7 @@ let emplace<T> = (map: StringMap<T>, key: String, value: T) -> StringMap<T> {
     }
 }
 
-let make_value<T> (key: String, value: T) -> key(String) & value(T) {
+let make_value<T> = (key: String, value: T) -> key(String) & value(T) {
     .key(key) & .value(value)
 }
 
