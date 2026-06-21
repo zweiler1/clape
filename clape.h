@@ -3065,6 +3065,7 @@ static void clape_free_expr(clape_expr_t *expr) {
                 free(ACCESS_ARR_AT(clape_param_t, expr->u.lambda.params, i)->name);
             }
             free(expr->u.lambda.params);
+            clape_free_type(&expr->u.lambda.return_type);
             clape_free_expr(expr->u.lambda.body);
             free(expr->u.lambda.body);
             break;
@@ -3273,6 +3274,14 @@ static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, c
             clape_value_t tail_val;
             if (val.type.tag == CLAPE_TYPE_LIST && val.u.list != NULL) {
                 head_val = val.u.list->head;
+                if (head_val.type.tag == CLAPE_TYPE_STRING) {
+                    head_val.u.sval = strdup(head_val.u.sval);
+                }
+                if (head_val.type.tag == CLAPE_TYPE_LIST && head_val.u.list) {
+                    for (clape_cons_t *n = head_val.u.list; n; n = n->tail) {
+                        n->arc++;
+                    }
+                }
                 tail_val = (clape_value_t){
                     .type = {.tag = CLAPE_TYPE_LIST},
                     .u.list = val.u.list->tail,
