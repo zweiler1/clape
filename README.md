@@ -290,7 +290,7 @@ let get_first = (list: [Int]) -> OptInt {
 let empty = []
 let list = [1, 2, 3]
 
-let _ = print {get_first empty)
+let _ = print {get_first empty}
 let _ = print {get_first list}
 ```
 
@@ -321,8 +321,8 @@ let get_value = (value: OptInt) -> Int {
     }
 }
 
-let _ = print {get_value None}
-let _ = print {get_value Some(69)}
+let _ = print {get_value .None}
+let _ = print {get_value .Some(69)}
 ```
 
 This program will print these lines to the console:
