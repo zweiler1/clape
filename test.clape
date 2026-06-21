@@ -111,6 +111,7 @@ let p2 = p1 & .y(2.2)
 let p3 = add_points p1 p2
 let _ = print p3
 
+
 let _ = print "--- Point3D ---"
 
 let Point3D = Point2D & z(Float)
@@ -122,3 +123,30 @@ let get_z = (p: Point3D) -> Float {
     p.z
 }
 let _ = print {get_z p3d}
+
+
+let _ = print "--- Sums ---"
+let OptInt = Some(Int) | None
+
+let get_first = (list: [Int]) -> OptInt {
+    match list {
+        [] => .None;
+        head :: tail => .Some(head)
+    }
+}
+
+let empty = []
+let list = [1, 2, 3]
+
+let _ = print {get_first empty}
+let _ = print {get_first list}
+
+let get_value = (value: OptInt) -> Int {
+    match value {
+        .Some(v) => v;
+        .None => 0
+    }
+}
+
+let _ = print {get_value .None}
+let _ = print {get_value .Some(69)}

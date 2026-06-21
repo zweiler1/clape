@@ -22,6 +22,7 @@ typedef struct clape_arr_t {
     /// @var `len`
     /// @brief The length of the array
     size_t len;
+
     /// @var `value`
     /// @brief The payload of the array, allocated as a variable member of bytes where the array
     /// elements are present directly inline in the array structure
@@ -110,6 +111,7 @@ typedef enum {
     CLAPE_TYPE_LIST,
     CLAPE_TYPE_UNIT,
     CLAPE_TYPE_PRODUCT,
+    CLAPE_TYPE_SUM,
 } clape_type_e;
 
 /// @struct `clape_type_t`
@@ -134,6 +136,12 @@ typedef struct clape_type_t {
         struct {
             clape_arr_t *fields;
         } product;
+
+        /// @variation `sum`
+        /// @brief A sum type containing an array of variant definitions
+        struct {
+            clape_arr_t *variants;
+        } sum;
     } u;
 } clape_type_t;
 
@@ -148,6 +156,22 @@ typedef struct clape_param_t {
     /// @brief The type of the function parameter
     clape_type_t type;
 } clape_param_t;
+
+/// @struct `clape_sum_variant_t`
+/// @brief A single variant in a sum type definition
+typedef struct {
+    /// @var `name`
+    /// @brief The constructor name (must start with uppercase)
+    char *name;
+
+    /// @var `has_type`
+    /// @brief Whether this variant carries a payload type
+    bool has_type;
+
+    /// @var `type`
+    /// @brief The payload type (only valid if has_type is true)
+    clape_type_t type;
+} clape_sum_variant_t;
 
 /// @struct `clape_product_field_t`
 /// @brief A single field in a product type definition
@@ -206,6 +230,18 @@ struct clape_value_t {
         /// @variation `product`
         /// @brief A product value (dynamic array of field values)
         clape_arr_t *product;
+
+        /// @variation `sum`
+        /// @brief A sum value (constructor name + optional payload)
+        struct {
+            /// @var `constructor`
+            /// @brief The constructor name (e.g. "Some", "None")
+            char *constructor;
+
+            /// @var `value`
+            /// @brief Pointer to the payload value, or NULL if no payload
+            struct clape_value_t *value;
+        } sum;
     } u;
 };
 
@@ -279,6 +315,8 @@ typedef enum {
     CLAPE_EXPR_FIELD,
     CLAPE_EXPR_FIELD_ACCESS,
     CLAPE_EXPR_TYPE,
+    CLAPE_EXPR_SUM,
+    CLAPE_EXPR_SUM_TYPE,
 } clape_expr_e;
 
 /// @struct `clape_expr_t`
@@ -372,6 +410,19 @@ typedef struct clape_expr_t {
             clape_arr_t *fields;
         } product_type;
 
+        /// @variation `sum_type`
+        /// @brief A sum type binding stub expression
+        struct {
+            clape_arr_t *variants;
+        } sum_type;
+
+        /// @variation `sum`
+        /// @brief A sum value expression: .Some(expr) or .None
+        struct {
+            char *constructor;
+            struct clape_expr_t *expr;
+        } sum;
+
         /// @variation `field`
         /// @brief A field value construction: .field_name(expr)
         struct {
@@ -402,6 +453,7 @@ typedef enum {
     CLAPE_PATTERN_VARIABLE,
     CLAPE_PATTERN_EMPTY_LIST,
     CLAPE_PATTERN_CONS,
+    CLAPE_PATTERN_SUM,
 } clape_pattern_tag_e;
 
 /// @struct `clape_pattern_t`
@@ -428,6 +480,14 @@ typedef struct clape_pattern_t {
             struct clape_pattern_t *head;
             struct clape_pattern_t *tail;
         } cons;
+
+        /// @variation `sum`
+        /// @brief A sum pattern: .Constructor(var) or .Constructor
+        struct {
+            char *constructor;
+            char *var;
+            bool has_payload;
+        } sum;
     } u;
 } clape_pattern_t;
 
@@ -580,6 +640,7 @@ typedef enum : uint8_t {
     TOK_CONS,
     TOK_DOT,
     TOK_AMP,
+    TOK_PIPE,
     // Type keywords
     TOK_TYPE_INT,
     TOK_TYPE_FLOAT,
@@ -1048,6 +1109,12 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             p++;
             continue;
         }
+        if (*p == '|') {
+            token_t t = {.tag = TOK_PIPE};
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            continue;
+        }
         if (*p == '#') {
             // Single-line comment: skip until \n or \0
             while (*p && *p != '\n') {
@@ -1214,6 +1281,9 @@ void clape_print_token(FILE *const stream, token_t *const token) {
         case TOK_AMP:
             fprintf(stream, "&");
             break;
+        case TOK_PIPE:
+            fprintf(stream, "|");
+            break;
         case TOK_TYPE_INT:
             fprintf(stream, "Int");
             break;
@@ -1282,6 +1352,7 @@ void clape_free_tokens(clape_arr_t *const tokens) {
             case TOK_SEMICOLON:
             case TOK_DOT:
             case TOK_AMP:
+            case TOK_PIPE:
             case TOK_TYPE_INT:
             case TOK_TYPE_FLOAT:
             case TOK_TYPE_BOOL:
@@ -1350,14 +1421,30 @@ typedef struct {
     size_t pos;
 
     /// @var type_env
-    /// @brief Linked list of product type bindings (populated at parse time only)
+    /// @brief Linked list of product / sum type bindings (populated at parse time only)
     struct clape_type_binding {
+        /// @var `name`
+        /// @brief The name of the binding
         char *name;
 
-        /// @var `fields`
-        /// @brief An array where every element is of type 'clape_product_field_t'
-        clape_arr_t *fields;
+        /// @var `is_sum`
+        /// @brief True if this is a sum type binding, false if product type binding
+        bool is_sum;
 
+        /// @var `u`
+        /// @brief Union of product fields or sum variants
+        union {
+            /// @var `fields`
+            /// @brief An array where every element is of type 'clape_product_field_t'
+            clape_arr_t *fields;
+
+            /// @var `variants`
+            /// @brief An array where every element is of type 'clape_sum_variant_t'
+            clape_arr_t *variants;
+        } u;
+
+        /// @var `next`
+        /// @brief The next type binding in the environment
         struct clape_type_binding *next;
     } *type_env;
 } clape_parser_t;
@@ -1374,7 +1461,8 @@ static clape_stmt_t clape_parse_stmt(clape_parser_t *p);
 static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t min_bp);
 static clape_expr_t clape_parse_block_body(clape_parser_t *p);
 static clape_expr_t clape_parse_block(clape_parser_t *p);
-static void clape_free_type(clape_type_t *type);
+static void clape_free_type(clape_type_t *const type);
+static clape_type_t clape_type_clone(const clape_type_t *const type);
 
 static clape_type_t clape_parse_type(clape_parser_t *p) {
     token_t *tok = clape_peek(p);
@@ -1469,20 +1557,96 @@ static clape_type_t clape_parse_type(clape_parser_t *p) {
                 if (strcmp(b->name, tok->u.identifier) != 0) {
                     continue;
                 }
-                clape_arr_t *fields = clape_arr_create(sizeof(clape_product_field_t), 0);
-                for (size_t i = 0; i < b->fields->len; i++) {
-                    clape_product_field_t *src = ACCESS_ARR_AT(clape_product_field_t, b->fields, i);
-                    clape_product_field_t field = {
-                        .name = strdup(src->name),
-                        .type = src->type,
+                if (!b->is_sum) {
+                    // Is Product
+                    clape_arr_t *fields = clape_arr_create(sizeof(clape_product_field_t), 0);
+                    for (size_t i = 0; i < b->u.fields->len; i++) {
+                        clape_product_field_t *src = ACCESS_ARR_AT( //
+                            clape_product_field_t, b->u.fields, i   //
+                        );
+                        clape_product_field_t field = {
+                            .name = strdup(src->name),
+                            .type = src->type,
+                        };
+                        clape_arr_append(sizeof(clape_product_field_t), &fields, &field);
+                    }
+                    result = (clape_type_t){
+                        .tag = CLAPE_TYPE_PRODUCT,
+                        .u.product = {.fields = fields},
                     };
-                    clape_arr_append(sizeof(clape_product_field_t), &fields, &field);
+                    goto check_amp;
+                }
+                // Is Sum
+                clape_arr_t *variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
+                for (size_t i = 0; i < b->u.variants->len; i++) {
+                    clape_sum_variant_t *const src = ACCESS_ARR_AT( //
+                        clape_sum_variant_t, b->u.variants, i       //
+                    );
+                    clape_sum_variant_t v = {
+                        .name = strdup(src->name),
+                        .has_type = src->has_type,
+                    };
+                    if (src->has_type) {
+                        v.type = clape_type_clone(&src->type);
+                    }
+                    clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
                 }
                 result = (clape_type_t){
-                    .tag = CLAPE_TYPE_PRODUCT,
-                    .u.product = {.fields = fields},
+                    .tag = CLAPE_TYPE_SUM,
+                    .u.sum = {.variants = variants},
                 };
-                goto check_amp;
+                while (clape_peek(p)->tag == TOK_PIPE) {
+                    clape_advance(p);
+                    clape_type_t rhs = clape_parse_type(p);
+                    if (rhs.tag != CLAPE_TYPE_SUM) {
+                        fprintf(stderr, "'|' requires sum types\n");
+                        exit(1);
+                    }
+                    for (size_t i = 0; i < rhs.u.sum.variants->len; i++) {
+                        clape_sum_variant_t *const src = ACCESS_ARR_AT( //
+                            clape_sum_variant_t, rhs.u.sum.variants, i  //
+                        );
+                        bool found = false;
+                        for (size_t j = 0; j < result.u.sum.variants->len; j++) {
+                            clape_sum_variant_t *const dest = ACCESS_ARR_AT(  //
+                                clape_sum_variant_t, result.u.sum.variants, j //
+                            );
+                            if (strcmp(dest->name, src->name) != 0) {
+                                continue;
+                            }
+                            fprintf(                                                          //
+                                stderr, "Duplicate constructor '%s' in sum type\n", src->name //
+                            );
+                            exit(1);
+                        }
+                        if (found) {
+                            continue;
+                        }
+                        clape_sum_variant_t v = {
+                            .name = strdup(src->name),
+                            .has_type = src->has_type,
+                        };
+                        if (src->has_type) {
+                            v.type = clape_type_clone(&src->type);
+                        }
+                        clape_arr_append(                                           //
+                            sizeof(clape_sum_variant_t), &result.u.sum.variants, &v //
+                        );
+                    }
+                    if (rhs.u.sum.variants != NULL) {
+                        for (size_t i = 0; i < rhs.u.sum.variants->len; i++) {
+                            clape_sum_variant_t *const v = ACCESS_ARR_AT(  //
+                                clape_sum_variant_t, rhs.u.sum.variants, i //
+                            );
+                            free(v->name);
+                            if (v->has_type) {
+                                clape_free_type(&v->type);
+                            }
+                        }
+                        free(rhs.u.sum.variants);
+                    }
+                }
+                return result;
             }
             fprintf(stderr, "Unknown type name '%s'\n", tok->u.identifier);
             exit(1);
@@ -1492,47 +1656,50 @@ static clape_type_t clape_parse_type(clape_parser_t *p) {
                 "Expected a type (Int, Float, Bool, String, Char, Unit, [T], (T -> U), or type name)\n");
             exit(1);
     }
+    return result;
 
 check_amp:
-    if (result.tag == CLAPE_TYPE_PRODUCT) {
-        while (clape_peek(p)->tag == TOK_AMP) {
-            clape_advance(p);
-            clape_type_t rhs = clape_parse_type(p);
-            if (rhs.tag != CLAPE_TYPE_PRODUCT) {
-                fprintf(stderr, "'&' requires product types\n");
-                exit(1);
+    while (clape_peek(p)->tag == TOK_AMP) {
+        clape_advance(p);
+        clape_type_t rhs = clape_parse_type(p);
+        if (rhs.tag != CLAPE_TYPE_PRODUCT) {
+            fprintf(stderr, "'&' requires product types\n");
+            exit(1);
+        }
+        for (size_t i = 0; i < rhs.u.product.fields->len; i++) {
+            clape_product_field_t *const src = ACCESS_ARR_AT(  //
+                clape_product_field_t, rhs.u.product.fields, i //
+            );
+            bool found = false;
+            for (size_t j = 0; j < result.u.product.fields->len; j++) {
+                clape_product_field_t *const dest = ACCESS_ARR_AT(    //
+                    clape_product_field_t, result.u.product.fields, j //
+                );
+                if (strcmp(dest->name, src->name) != 0) {
+                    continue;
+                }
+                free(dest->name);
+                clape_free_type(&dest->type);
+                dest->name = strdup(src->name);
+                dest->type = src->type;
+                found = true;
+                break;
             }
+            if (found) {
+                continue;
+            }
+            clape_product_field_t field = {.name = strdup(src->name), .type = src->type};
+            clape_arr_append(sizeof(clape_product_field_t), &result.u.product.fields, &field);
+        }
+        if (rhs.u.product.fields != NULL) {
             for (size_t i = 0; i < rhs.u.product.fields->len; i++) {
-                clape_product_field_t *src =
-                    ACCESS_ARR_AT(clape_product_field_t, rhs.u.product.fields, i);
-                bool found = false;
-                for (size_t j = 0; j < result.u.product.fields->len; j++) {
-                    clape_product_field_t *dst =
-                        ACCESS_ARR_AT(clape_product_field_t, result.u.product.fields, j);
-                    if (strcmp(dst->name, src->name) == 0) {
-                        free(dst->name);
-                        clape_free_type(&dst->type);
-                        dst->name = strdup(src->name);
-                        dst->type = src->type;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    clape_product_field_t field = {.name = strdup(src->name), .type = src->type};
-                    clape_arr_append(sizeof(clape_product_field_t), &result.u.product.fields,
-                        &field);
-                }
+                clape_product_field_t *const field = ACCESS_ARR_AT( //
+                    clape_product_field_t, rhs.u.product.fields, i  //
+                );
+                free(field->name);
+                clape_free_type(&field->type);
             }
-            if (rhs.u.product.fields) {
-                for (size_t i = 0; i < rhs.u.product.fields->len; i++) {
-                    clape_product_field_t *f =
-                        ACCESS_ARR_AT(clape_product_field_t, rhs.u.product.fields, i);
-                    free(f->name);
-                    clape_free_type(&f->type);
-                }
-                free(rhs.u.product.fields);
-            }
+            free(rhs.u.product.fields);
         }
     }
     return result;
@@ -1552,6 +1719,7 @@ static clape_binding_power_t clape_infix_bp(token_type_e tag) {
         case TOK_CONS:
             return CLAPE_BINDING_POWER_CONS;
         case TOK_AMP:
+        case TOK_PIPE:
             return CLAPE_BINDING_POWER_FACTOR;
         case TOK_DOT:
             return CLAPE_BINDING_POWER_CALL;
@@ -1594,6 +1762,46 @@ static clape_pattern_t clape_parse_primary_pattern(clape_parser_t *p) {
         }
         clape_free_expr(&lit);
         return pat;
+    }
+    if (tok->tag == TOK_DOT) {
+        clape_advance(p);
+        token_t *ctor = clape_advance(p);
+        if (ctor->tag != TOK_IDENTIFIER || !isupper(ctor->u.identifier[0])) {
+            fprintf(stderr, "Expected uppercase constructor name after '.' in pattern\n");
+            exit(1);
+        }
+        if (clape_peek(p)->tag == TOK_LPAREN) {
+            clape_advance(p); // consume (
+            token_t *var = clape_advance(p);
+            if (var->tag != TOK_IDENTIFIER) {
+                fprintf(stderr, "Expected variable name in sum pattern\n");
+                exit(1);
+            }
+            token_t *close = clape_advance(p);
+            if (close->tag != TOK_RPAREN) {
+                fprintf(stderr, "Expected ')' after variable in sum pattern\n");
+                exit(1);
+            }
+            return (clape_pattern_t){
+                .tag = CLAPE_PATTERN_SUM,
+                .u.sum =
+                    {
+                        .constructor = strdup(ctor->u.identifier),
+                        .var = strdup(var->u.identifier),
+                        .has_payload = true,
+                    },
+            };
+        } else {
+            return (clape_pattern_t){
+                .tag = CLAPE_PATTERN_SUM,
+                .u.sum =
+                    {
+                        .constructor = strdup(ctor->u.identifier),
+                        .var = NULL,
+                        .has_payload = false,
+                    },
+            };
+        }
     }
     if (tok->tag == TOK_IDENTIFIER) {
         clape_advance(p);
@@ -1859,22 +2067,47 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                 fprintf(stderr, "Expected field name after '.'\n");
                 exit(1);
             }
-            token_t *open = clape_advance(p);
-            if (open->tag != TOK_LPAREN) {
-                fprintf(stderr, "Expected '(' after field name in field construction\n");
-                exit(1);
+            if (isupper(field_tok->u.identifier[0])) {
+                // Sum constructor value: .Some(expr) or .None
+                char *constructor = strdup(field_tok->u.identifier);
+                if (clape_peek(p)->tag == TOK_LPAREN) {
+                    clape_advance(p); // consume (
+                    clape_expr_t *val = malloc(sizeof(clape_expr_t));
+                    *val = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+                    token_t *close = clape_advance(p);
+                    if (close->tag != TOK_RPAREN) {
+                        fprintf(stderr, "Expected ')' after sum constructor value\n");
+                        exit(1);
+                    }
+                    lhs = (clape_expr_t){
+                        .tag = CLAPE_EXPR_SUM,
+                        .u.sum = {.constructor = constructor, .expr = val},
+                    };
+                } else {
+                    lhs = (clape_expr_t){
+                        .tag = CLAPE_EXPR_SUM,
+                        .u.sum = {.constructor = constructor, .expr = NULL},
+                    };
+                }
+            } else {
+                // Product field value: .field_name(expr)
+                token_t *open = clape_advance(p);
+                if (open->tag != TOK_LPAREN) {
+                    fprintf(stderr, "Expected '(' after field name in field construction\n");
+                    exit(1);
+                }
+                clape_expr_t *val = malloc(sizeof(clape_expr_t));
+                *val = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+                token_t *close = clape_advance(p);
+                if (close->tag != TOK_RPAREN) {
+                    fprintf(stderr, "Expected ')' after field value\n");
+                    exit(1);
+                }
+                lhs = (clape_expr_t){
+                    .tag = CLAPE_EXPR_FIELD,
+                    .u.field = {.name = strdup(field_tok->u.identifier), .value = val},
+                };
             }
-            clape_expr_t *val = malloc(sizeof(clape_expr_t));
-            *val = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
-            token_t *close = clape_advance(p);
-            if (close->tag != TOK_RPAREN) {
-                fprintf(stderr, "Expected ')' after field value\n");
-                exit(1);
-            }
-            lhs = (clape_expr_t){
-                .tag = CLAPE_EXPR_FIELD,
-                .u.field = {.name = strdup(field_tok->u.identifier), .value = val},
-            };
             break;
         }
         case TOK_LBRACE:
@@ -1882,7 +2115,8 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             break;
         case TOK_IDENTIFIER: {
             token_t *next = clape_peek(p);
-            if (next->tag == TOK_LPAREN) {
+            bool is_upper = isupper(tok->u.identifier[0]);
+            if (next->tag == TOK_LPAREN && !is_upper) {
                 // Product field definition: name(Type)
                 clape_advance(p); // consume (
                 clape_type_t field_type = clape_parse_type(p);
@@ -1904,6 +2138,29 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                             .type = {.tag = CLAPE_TYPE_PRODUCT, .u.product = {.fields = fields}},
                         },
                 };
+            } else if (next->tag == TOK_LPAREN && is_upper) {
+                // Sum type constructor with payload: Some(Int)
+                clape_advance(p); // consume (
+                clape_type_t inner = clape_parse_type(p);
+                token_t *close = clape_advance(p);
+                if (close->tag != TOK_RPAREN) {
+                    fprintf(stderr, "Expected ')' after sum constructor type\n");
+                    exit(1);
+                }
+                clape_arr_t *variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
+                clape_sum_variant_t v = {
+                    .name = strdup(tok->u.identifier),
+                    .has_type = true,
+                    .type = inner,
+                };
+                clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
+                lhs = (clape_expr_t){
+                    .tag = CLAPE_EXPR_TYPE,
+                    .u.type_expr =
+                        {
+                            .type = {.tag = CLAPE_TYPE_SUM, .u.sum = {.variants = variants}},
+                        },
+                };
             } else {
                 // Check if this identifier is a known type name
                 bool in_type_env = false;
@@ -1915,12 +2172,45 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                 }
                 if (in_type_env) {
                     for (struct clape_type_binding *b = p->type_env; b; b = b->next) {
-                        if (strcmp(b->name, tok->u.identifier) == 0) {
-                            clape_arr_t *fields =
-                                clape_arr_create(sizeof(clape_product_field_t), 0);
-                            for (size_t i = 0; i < b->fields->len; i++) {
-                                clape_product_field_t *src =
-                                    ACCESS_ARR_AT(clape_product_field_t, b->fields, i);
+                        if (strcmp(b->name, tok->u.identifier) != 0) {
+                            continue;
+                        }
+                        if (b->is_sum) {
+                            clape_arr_t *variants = clape_arr_create( //
+                                sizeof(clape_sum_variant_t), 0        //
+                            );
+                            for (size_t i = 0; i < b->u.variants->len; i++) {
+                                clape_sum_variant_t *const src = ACCESS_ARR_AT( //
+                                    clape_sum_variant_t, b->u.variants, i       //
+                                );
+                                clape_sum_variant_t v = {
+                                    .name = strdup(src->name),
+                                    .has_type = src->has_type,
+                                };
+                                if (src->has_type) {
+                                    v.type = clape_type_clone(&src->type);
+                                }
+                                clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
+                            }
+                            lhs = (clape_expr_t){
+                                .tag = CLAPE_EXPR_TYPE,
+                                .u.type_expr =
+                                    {
+                                        .type =
+                                            {
+                                                .tag = CLAPE_TYPE_SUM,
+                                                .u.sum = {.variants = variants},
+                                            },
+                                    },
+                            };
+                        } else {
+                            clape_arr_t *fields = clape_arr_create( //
+                                sizeof(clape_product_field_t), 0    //
+                            );
+                            for (size_t i = 0; i < b->u.fields->len; i++) {
+                                clape_product_field_t *const src = ACCESS_ARR_AT( //
+                                    clape_product_field_t, b->u.fields, i         //
+                                );
                                 clape_product_field_t f = {
                                     .name = strdup(src->name),
                                     .type = src->type,
@@ -1931,13 +2221,31 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                                 .tag = CLAPE_EXPR_TYPE,
                                 .u.type_expr =
                                     {
-                                        .type = {.tag = CLAPE_TYPE_PRODUCT,
-                                            .u.product = {.fields = fields}},
+                                        .type =
+                                            {
+                                                .tag = CLAPE_TYPE_PRODUCT,
+                                                .u.product = {.fields = fields},
+                                            },
                                     },
                             };
-                            break;
                         }
+                        break;
                     }
+                } else if (is_upper) {
+                    // Standalone sum constructor without payload: None (in type definition)
+                    clape_arr_t *variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
+                    clape_sum_variant_t v = {
+                        .name = strdup(tok->u.identifier),
+                        .has_type = false,
+                    };
+                    clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
+                    lhs = (clape_expr_t){
+                        .tag = CLAPE_EXPR_TYPE,
+                        .u.type_expr =
+                            {
+                                .type = {.tag = CLAPE_TYPE_SUM, .u.sum = {.variants = variants}},
+                            },
+                    };
                 } else {
                     lhs = (clape_expr_t){
                         .tag = CLAPE_EXPR_IDENT,
@@ -1981,171 +2289,13 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
 
         clape_binding_power_t cur_bp = clape_infix_bp(next);
 
-        if (next == TOK_DOT && cur_bp > min_bp) {
-            clape_advance(p);
-            token_t *field_tok = clape_advance(p);
-            if (field_tok->tag != TOK_IDENTIFIER) {
-                fprintf(stderr, "Expected field name after '.'\n");
-                exit(1);
-            }
-            clape_expr_t *expr_ptr = malloc(sizeof(clape_expr_t));
-            *expr_ptr = lhs;
-            lhs = (clape_expr_t){
-                .tag = CLAPE_EXPR_FIELD_ACCESS,
-                .u.field_access = {.expr = expr_ptr, .name = strdup(field_tok->u.identifier)},
-            };
-            continue;
-        }
-
-        if (cur_bp > min_bp) {
-            token_t *op_tok = clape_advance(p);
-            clape_binop_e op;
-            bool is_cons = false;
-            switch (op_tok->tag) {
-                case TOK_PLUS:
-                    op = CLAPE_BINOP_ADD;
-                    cur_bp = CLAPE_BINDING_POWER_TERM;
-                    break;
-                case TOK_MINUS:
-                    op = CLAPE_BINOP_SUB;
-                    cur_bp = CLAPE_BINDING_POWER_TERM;
-                    break;
-                case TOK_MUL:
-                    op = CLAPE_BINOP_MUL;
-                    cur_bp = CLAPE_BINDING_POWER_FACTOR;
-                    break;
-                case TOK_DIV:
-                    op = CLAPE_BINOP_DIV;
-                    cur_bp = CLAPE_BINDING_POWER_FACTOR;
-                    break;
-                case TOK_EQ_EQ:
-                    op = CLAPE_BINOP_EQ;
-                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
-                    break;
-                case TOK_NE:
-                    op = CLAPE_BINOP_NE;
-                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
-                    break;
-                case TOK_LT:
-                    op = CLAPE_BINOP_LT;
-                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
-                    break;
-                case TOK_LE:
-                    op = CLAPE_BINOP_LE;
-                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
-                    break;
-                case TOK_GT:
-                    op = CLAPE_BINOP_GT;
-                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
-                    break;
-                case TOK_GE:
-                    op = CLAPE_BINOP_GE;
-                    cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
-                    break;
-                case TOK_AND:
-                    op = CLAPE_BINOP_AND;
-                    cur_bp = CLAPE_BINDING_POWER_LOGICAL;
-                    break;
-                case TOK_OR:
-                    op = CLAPE_BINOP_OR;
-                    cur_bp = CLAPE_BINDING_POWER_LOGICAL;
-                    break;
-                case TOK_CONS:
-                    op = CLAPE_BINOP_CONS;
-                    cur_bp = CLAPE_BINDING_POWER_CONS;
-                    is_cons = true;
-                    break;
-                case TOK_AMP:
-                    if (lhs.tag == CLAPE_EXPR_TYPE) {
-                        // Parse-time type combine: lhs & rhs are product types
-                        clape_expr_t rhs = clape_parse_expr(p, CLAPE_BINDING_POWER_FACTOR);
-                        if (rhs.tag != CLAPE_EXPR_TYPE) {
-                            fprintf(stderr, "Expected type expression after '&'\n");
-                            exit(1);
-                        }
-                        clape_arr_t *combined = NULL;
-                        if (lhs.u.type_expr.type.tag == CLAPE_TYPE_PRODUCT) {
-                            combined = lhs.u.type_expr.type.u.product.fields;
-                            lhs.u.type_expr.type.u.product.fields = NULL;
-                        }
-                        if (rhs.u.type_expr.type.tag == CLAPE_TYPE_PRODUCT) {
-                            const size_t field_count = rhs.u.type_expr.type.u.product.fields->len;
-                            for (size_t i = 0; i < field_count; i++) {
-                                clape_product_field_t *src = ACCESS_ARR_AT(clape_product_field_t,
-                                    rhs.u.type_expr.type.u.product.fields, i);
-                                bool found = false;
-                                if (combined) {
-                                    for (size_t j = 0; j < combined->len; j++) {
-                                        clape_product_field_t *dst = ACCESS_ARR_AT( //
-                                            clape_product_field_t, combined, j      //
-                                        );
-                                        if (strcmp(dst->name, src->name) != 0) {
-                                            continue;
-                                        }
-                                        free(dst->name);
-                                        clape_free_type(&dst->type);
-                                        dst->name = strdup(src->name);
-                                        dst->type = src->type;
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if (found) {
-                                    continue;
-                                }
-                                if (!combined) {
-                                    combined = clape_arr_create(sizeof(clape_product_field_t), 0);
-                                }
-                                clape_product_field_t field = {
-                                    .name = strdup(src->name),
-                                    .type = src->type,
-                                };
-                                clape_arr_append(sizeof(clape_product_field_t), &combined, &field);
-                            }
-                        }
-                        if (rhs.u.type_expr.type.u.product.fields) {
-                            for (size_t i = 0; i < rhs.u.type_expr.type.u.product.fields->len;
-                                i++) {
-                                clape_product_field_t *f = ACCESS_ARR_AT(clape_product_field_t,
-                                    rhs.u.type_expr.type.u.product.fields, i);
-                                free(f->name);
-                                clape_free_type(&f->type);
-                            }
-                            free(rhs.u.type_expr.type.u.product.fields);
-                        }
-                        lhs = (clape_expr_t){
-                            .tag = CLAPE_EXPR_TYPE,
-                            .u.type_expr =
-                                {
-                                    .type = {.tag = CLAPE_TYPE_PRODUCT,
-                                        .u.product = {.fields = combined}},
-                                },
-                        };
-                        continue;
-                    }
-                    op = CLAPE_BINOP_PROD;
-                    cur_bp = CLAPE_BINDING_POWER_FACTOR;
-                    break;
-                default:
-                    fprintf(stderr, "Unexpected infix operator\n");
-                    exit(1);
-            }
-            clape_expr_t rhs = clape_parse_expr(p, is_cons ? cur_bp - 1 : cur_bp);
-            clape_expr_t *lhs_ptr = malloc(sizeof(clape_expr_t));
-            *lhs_ptr = lhs;
-            clape_expr_t *rhs_ptr = malloc(sizeof(clape_expr_t));
-            *rhs_ptr = rhs;
-            lhs = (clape_expr_t){
-                .tag = CLAPE_EXPR_BINOP,
-                .u.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
-            };
-        } else if ((next == TOK_INT || next == TOK_FLOAT || next == TOK_TRUE || next == TOK_FALSE ||
-                       next == TOK_NOT || next == TOK_LPAREN || next == TOK_LBRACE ||
-                       next == TOK_LBRACKET || next == TOK_MATCH || next == TOK_IDENTIFIER ||
-                       next == TOK_STRING || next == TOK_CHAR || next == TOK_DOT ||
-                       next == TOK_TYPE_INT || next == TOK_TYPE_FLOAT || next == TOK_TYPE_BOOL ||
-                       next == TOK_TYPE_STRING || next == TOK_TYPE_CHAR || next == TOK_TYPE_UNIT) &&
-            CLAPE_BINDING_POWER_CALL > min_bp) {
+        if (cur_bp <= min_bp && CLAPE_BINDING_POWER_CALL > min_bp &&
+            (next == TOK_INT || next == TOK_FLOAT || next == TOK_TRUE || next == TOK_FALSE ||
+                next == TOK_NOT || next == TOK_LPAREN || next == TOK_LBRACE ||
+                next == TOK_LBRACKET || next == TOK_MATCH || next == TOK_IDENTIFIER ||
+                next == TOK_STRING || next == TOK_CHAR || next == TOK_DOT || next == TOK_TYPE_INT ||
+                next == TOK_TYPE_FLOAT || next == TOK_TYPE_BOOL || next == TOK_TYPE_STRING ||
+                next == TOK_TYPE_CHAR || next == TOK_TYPE_UNIT)) {
             cur_bp = CLAPE_BINDING_POWER_CALL;
             clape_expr_t arg = clape_parse_expr(p, cur_bp);
             clape_expr_t *callee_ptr = malloc(sizeof(clape_expr_t));
@@ -2156,9 +2306,258 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                 .tag = CLAPE_EXPR_CALL,
                 .u.call = {.callee = callee_ptr, .arg = arg_ptr},
             };
-        } else {
+            continue;
+        } else if (cur_bp <= min_bp) {
             break;
         }
+        if (next == TOK_DOT) {
+            token_t *lookahead = ACCESS_ARR_AT(token_t, p->tokens, p->pos + 1);
+            if (lookahead->tag == TOK_IDENTIFIER && islower(lookahead->u.identifier[0])) {
+                // Field access: expr.field_name
+                clape_advance(p);
+                token_t *field_tok = clape_advance(p);
+                clape_expr_t *expr_ptr = malloc(sizeof(clape_expr_t));
+                *expr_ptr = lhs;
+                lhs = (clape_expr_t){
+                    .tag = CLAPE_EXPR_FIELD_ACCESS,
+                    .u.field_access = {.expr = expr_ptr, .name = strdup(field_tok->u.identifier)},
+                };
+                continue;
+            }
+            // Uppercase after DOT → consume DOT, parse sum constructor as call arg
+            clape_advance(p);
+            token_t *ctor_tok = clape_advance(p);
+            char *constructor = strdup(ctor_tok->u.identifier);
+            clape_expr_t *arg = malloc(sizeof(clape_expr_t));
+            if (clape_peek(p)->tag == TOK_LPAREN) {
+                clape_advance(p);
+                clape_expr_t *val = malloc(sizeof(clape_expr_t));
+                *val = clape_parse_expr(p, CLAPE_BINDING_POWER_DEFAULT);
+                token_t *close = clape_advance(p);
+                if (close->tag != TOK_RPAREN) {
+                    fprintf(stderr, "Expected ')' after sum constructor value\n");
+                    exit(1);
+                }
+                *arg = (clape_expr_t){
+                    .tag = CLAPE_EXPR_SUM,
+                    .u.sum = {.constructor = constructor, .expr = val},
+                };
+            } else {
+                *arg = (clape_expr_t){
+                    .tag = CLAPE_EXPR_SUM,
+                    .u.sum = {.constructor = constructor, .expr = NULL},
+                };
+            }
+            clape_expr_t *callee_ptr = malloc(sizeof(clape_expr_t));
+            *callee_ptr = lhs;
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_CALL,
+                .u.call = {.callee = callee_ptr, .arg = arg},
+            };
+            continue;
+        }
+        token_t *op_tok = clape_advance(p);
+        clape_binop_e op;
+        bool is_cons = false;
+        switch (op_tok->tag) {
+            case TOK_PLUS:
+                op = CLAPE_BINOP_ADD;
+                cur_bp = CLAPE_BINDING_POWER_TERM;
+                break;
+            case TOK_MINUS:
+                op = CLAPE_BINOP_SUB;
+                cur_bp = CLAPE_BINDING_POWER_TERM;
+                break;
+            case TOK_MUL:
+                op = CLAPE_BINOP_MUL;
+                cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                break;
+            case TOK_DIV:
+                op = CLAPE_BINOP_DIV;
+                cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                break;
+            case TOK_EQ_EQ:
+                op = CLAPE_BINOP_EQ;
+                cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                break;
+            case TOK_NE:
+                op = CLAPE_BINOP_NE;
+                cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                break;
+            case TOK_LT:
+                op = CLAPE_BINOP_LT;
+                cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                break;
+            case TOK_LE:
+                op = CLAPE_BINOP_LE;
+                cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                break;
+            case TOK_GT:
+                op = CLAPE_BINOP_GT;
+                cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                break;
+            case TOK_GE:
+                op = CLAPE_BINOP_GE;
+                cur_bp = CLAPE_BINDING_POWER_RELATIONAL;
+                break;
+            case TOK_AND:
+                op = CLAPE_BINOP_AND;
+                cur_bp = CLAPE_BINDING_POWER_LOGICAL;
+                break;
+            case TOK_OR:
+                op = CLAPE_BINOP_OR;
+                cur_bp = CLAPE_BINDING_POWER_LOGICAL;
+                break;
+            case TOK_CONS:
+                op = CLAPE_BINOP_CONS;
+                cur_bp = CLAPE_BINDING_POWER_CONS;
+                is_cons = true;
+                break;
+            case TOK_AMP:
+                if (lhs.tag == CLAPE_EXPR_TYPE) {
+                    // Parse-time type combine: lhs & rhs are product types
+                    clape_expr_t rhs = clape_parse_expr(p, CLAPE_BINDING_POWER_FACTOR);
+                    if (rhs.tag != CLAPE_EXPR_TYPE) {
+                        fprintf(stderr, "Expected type expression after '&'\n");
+                        exit(1);
+                    }
+                    clape_arr_t *combined = NULL;
+                    if (lhs.u.type_expr.type.tag == CLAPE_TYPE_PRODUCT) {
+                        combined = lhs.u.type_expr.type.u.product.fields;
+                        lhs.u.type_expr.type.u.product.fields = NULL;
+                    }
+                    if (rhs.u.type_expr.type.tag == CLAPE_TYPE_PRODUCT) {
+                        const size_t field_count = rhs.u.type_expr.type.u.product.fields->len;
+                        for (size_t i = 0; i < field_count; i++) {
+                            clape_product_field_t *const src = ACCESS_ARR_AT(                   //
+                                clape_product_field_t, rhs.u.type_expr.type.u.product.fields, i //
+                            );
+                            bool found = false;
+                            if (combined) {
+                                for (size_t j = 0; j < combined->len; j++) {
+                                    clape_product_field_t *const dest = ACCESS_ARR_AT( //
+                                        clape_product_field_t, combined, j             //
+                                    );
+                                    if (strcmp(dest->name, src->name) != 0) {
+                                        continue;
+                                    }
+                                    free(dest->name);
+                                    clape_free_type(&dest->type);
+                                    dest->name = strdup(src->name);
+                                    dest->type = src->type;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) {
+                                continue;
+                            }
+                            if (!combined) {
+                                combined = clape_arr_create(sizeof(clape_product_field_t), 0);
+                            }
+                            clape_product_field_t field = {
+                                .name = strdup(src->name),
+                                .type = src->type,
+                            };
+                            clape_arr_append(sizeof(clape_product_field_t), &combined, &field);
+                        }
+                    }
+                    if (rhs.u.type_expr.type.u.product.fields) {
+                        for (size_t i = 0; i < rhs.u.type_expr.type.u.product.fields->len; i++) {
+                            clape_product_field_t *const field = ACCESS_ARR_AT(                 //
+                                clape_product_field_t, rhs.u.type_expr.type.u.product.fields, i //
+                            );
+                            free(field->name);
+                            clape_free_type(&field->type);
+                        }
+                        free(rhs.u.type_expr.type.u.product.fields);
+                    }
+                    lhs = (clape_expr_t){
+                        .tag = CLAPE_EXPR_TYPE,
+                        .u.type_expr =
+                            {
+                                .type = {.tag = CLAPE_TYPE_PRODUCT,
+                                    .u.product = {.fields = combined}},
+                            },
+                    };
+                    continue;
+                }
+                op = CLAPE_BINOP_PROD;
+                cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                break;
+            case TOK_PIPE:
+                if (lhs.tag != CLAPE_EXPR_TYPE || lhs.u.type_expr.type.tag != CLAPE_TYPE_SUM) {
+                    fprintf(stderr, "'|' requires sum types\n");
+                    exit(1);
+                }
+                clape_expr_t rhs_pipe = clape_parse_expr(p, CLAPE_BINDING_POWER_FACTOR);
+                if (rhs_pipe.tag != CLAPE_EXPR_TYPE ||
+                    rhs_pipe.u.type_expr.type.tag != CLAPE_TYPE_SUM) {
+                    fprintf(stderr, "Expected sum type after '|'\n");
+                    exit(1);
+                }
+                clape_arr_t *combined_sum = lhs.u.type_expr.type.u.sum.variants;
+                lhs.u.type_expr.type.u.sum.variants = NULL;
+                for (size_t i = 0; i < rhs_pipe.u.type_expr.type.u.sum.variants->len; i++) {
+                    clape_sum_variant_t *const src = ACCESS_ARR_AT(                      //
+                        clape_sum_variant_t, rhs_pipe.u.type_expr.type.u.sum.variants, i //
+                    );
+                    if (combined_sum) {
+                        for (size_t j = 0; j < combined_sum->len; j++) {
+                            clape_sum_variant_t *const dest = ACCESS_ARR_AT( //
+                                clape_sum_variant_t, combined_sum, j         //
+                            );
+                            if (strcmp(dest->name, src->name) != 0) {
+                                continue;
+                            }
+                            fprintf(stderr, "Duplicate constructor '%s' in sum type\n", src->name);
+                            exit(1);
+                        }
+                    }
+                    if (!combined_sum) {
+                        combined_sum = clape_arr_create(sizeof(clape_sum_variant_t), 0);
+                    }
+                    clape_sum_variant_t v = {
+                        .name = strdup(src->name),
+                        .has_type = src->has_type,
+                    };
+                    if (src->has_type)
+                        v.type = clape_type_clone(&src->type);
+                    clape_arr_append(sizeof(clape_sum_variant_t), &combined_sum, &v);
+                }
+                if (rhs_pipe.u.type_expr.type.u.sum.variants) {
+                    for (size_t i = 0; i < rhs_pipe.u.type_expr.type.u.sum.variants->len; i++) {
+                        clape_sum_variant_t *const variant = ACCESS_ARR_AT(                  //
+                            clape_sum_variant_t, rhs_pipe.u.type_expr.type.u.sum.variants, i //
+                        );
+                        free(variant->name);
+                        if (variant->has_type) {
+                            clape_free_type(&variant->type);
+                        }
+                    }
+                    free(rhs_pipe.u.type_expr.type.u.sum.variants);
+                }
+                lhs = (clape_expr_t){
+                    .tag = CLAPE_EXPR_TYPE,
+                    .u.type_expr =
+                        {
+                            .type = {.tag = CLAPE_TYPE_SUM, .u.sum = {.variants = combined_sum}},
+                        },
+                };
+                continue;
+            default:
+                fprintf(stderr, "Unexpected infix operator\n");
+                exit(1);
+        }
+        clape_expr_t rhs = clape_parse_expr(p, is_cons ? cur_bp - 1 : cur_bp);
+        clape_expr_t *lhs_ptr = malloc(sizeof(clape_expr_t));
+        *lhs_ptr = lhs;
+        clape_expr_t *rhs_ptr = malloc(sizeof(clape_expr_t));
+        *rhs_ptr = rhs;
+        lhs = (clape_expr_t){
+            .tag = CLAPE_EXPR_BINOP,
+            .u.binop = {.op = op, .lhs = lhs_ptr, .rhs = rhs_ptr},
+        };
     }
     return lhs;
 }
@@ -2179,26 +2578,47 @@ static clape_stmt_t clape_parse_stmt(clape_parser_t *p) {
 
     // If the RHS is a type expression, register a type binding
     if (rhs.tag == CLAPE_EXPR_TYPE) {
-        if (rhs.u.type_expr.type.tag != CLAPE_TYPE_PRODUCT) {
-            fprintf(stderr, "Type bindings must define a product type\n");
+        if (rhs.u.type_expr.type.tag == CLAPE_TYPE_PRODUCT) {
+            clape_arr_t *const fields = rhs.u.type_expr.type.u.product.fields;
+            rhs.u.type_expr.type.u.product.fields = NULL;
+            clape_free_type(&rhs.u.type_expr.type);
+            struct clape_type_binding *const binding = malloc(sizeof(struct clape_type_binding));
+            binding->name = strdup(name_tok->u.identifier);
+            binding->is_sum = false;
+            binding->u.fields = fields;
+            binding->next = p->type_env;
+            p->type_env = binding;
+            return (clape_stmt_t){
+                .tag = CLAPE_STMT_LET,
+                .u.let =
+                    {
+                        .name = strdup(name_tok->u.identifier),
+                        .expr = {.tag = CLAPE_EXPR_PRODUCT_TYPE,
+                            .u.product_type = {.fields = NULL}},
+                    },
+            };
+        } else if (rhs.u.type_expr.type.tag == CLAPE_TYPE_SUM) {
+            clape_arr_t *const variants = rhs.u.type_expr.type.u.sum.variants;
+            rhs.u.type_expr.type.u.sum.variants = NULL;
+            clape_free_type(&rhs.u.type_expr.type);
+            struct clape_type_binding *const binding = malloc(sizeof(struct clape_type_binding));
+            binding->name = strdup(name_tok->u.identifier);
+            binding->is_sum = true;
+            binding->u.variants = variants;
+            binding->next = p->type_env;
+            p->type_env = binding;
+            return (clape_stmt_t){
+                .tag = CLAPE_STMT_LET,
+                .u.let =
+                    {
+                        .name = strdup(name_tok->u.identifier),
+                        .expr = {.tag = CLAPE_EXPR_SUM_TYPE, .u.sum_type = {.variants = NULL}},
+                    },
+            };
+        } else {
+            fprintf(stderr, "Type bindings must define a product or sum type\n");
             exit(1);
         }
-        clape_arr_t *fields = rhs.u.type_expr.type.u.product.fields;
-        rhs.u.type_expr.type.u.product.fields = NULL;
-        clape_free_type(&rhs.u.type_expr.type);
-        struct clape_type_binding *binding = malloc(sizeof(struct clape_type_binding));
-        binding->name = strdup(name_tok->u.identifier);
-        binding->fields = fields;
-        binding->next = p->type_env;
-        p->type_env = binding;
-        return (clape_stmt_t){
-            .tag = CLAPE_STMT_LET,
-            .u.let =
-                {
-                    .name = strdup(name_tok->u.identifier),
-                    .expr = {.tag = CLAPE_EXPR_PRODUCT_TYPE, .u.product_type = {.fields = NULL}},
-                },
-        };
     }
 
     clape_stmt_t stmt = {
@@ -2264,18 +2684,33 @@ bool clape_parse(clape_program_t *const program, clape_arr_t *const tokens) {
         }
     }
     // Free type env
-    struct clape_type_binding *b = p.type_env;
-    while (b) {
-        struct clape_type_binding *next = b->next;
-        free(b->name);
-        if (b->fields) {
-            for (size_t i = 0; i < b->fields->len; i++) {
-                free(ACCESS_ARR_AT(clape_product_field_t, b->fields, i)->name);
+    struct clape_type_binding *binding = p.type_env;
+    while (binding != NULL) {
+        struct clape_type_binding *const next = binding->next;
+        free(binding->name);
+        if (binding->is_sum) {
+            if (binding->u.variants) {
+                for (size_t i = 0; i < binding->u.variants->len; i++) {
+                    clape_sum_variant_t *const variant = ACCESS_ARR_AT( //
+                        clape_sum_variant_t, binding->u.variants, i     //
+                    );
+                    free(variant->name);
+                    if (variant->has_type) {
+                        clape_free_type(&variant->type);
+                    }
+                }
+                free(binding->u.variants);
             }
-            free(b->fields);
+        } else {
+            if (binding->u.fields) {
+                for (size_t i = 0; i < binding->u.fields->len; i++) {
+                    free(ACCESS_ARR_AT(clape_product_field_t, binding->u.fields, i)->name);
+                }
+                free(binding->u.fields);
+            }
         }
-        free(b);
-        b = next;
+        free(binding);
+        binding = next;
     }
     return true;
 }
@@ -2320,6 +2755,22 @@ static void clape_print_type(FILE *stream, clape_type_t *type) {
                 fprintf(stream, "%s(", f->name);
                 clape_print_type(stream, &f->type);
                 fprintf(stream, ")");
+            }
+            break;
+        case CLAPE_TYPE_SUM:
+            for (size_t i = 0; i < type->u.sum.variants->len; i++) {
+                if (i > 0) {
+                    fprintf(stream, " | ");
+                }
+                clape_sum_variant_t *const variant = ACCESS_ARR_AT( //
+                    clape_sum_variant_t, type->u.sum.variants, i    //
+                );
+                fprintf(stream, "%s", variant->name);
+                if (variant->has_type) {
+                    fprintf(stream, "(");
+                    clape_print_type(stream, &variant->type);
+                    fprintf(stream, ")");
+                }
             }
             break;
     }
@@ -2450,6 +2901,17 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
         case CLAPE_EXPR_PRODUCT_TYPE:
             fprintf(stream, "<product-type>");
             break;
+        case CLAPE_EXPR_SUM_TYPE:
+            fprintf(stream, "<sum-type>");
+            break;
+        case CLAPE_EXPR_SUM:
+            fprintf(stream, ".%s", expr->u.sum.constructor);
+            if (expr->u.sum.expr) {
+                fprintf(stream, "(");
+                clape_print_expr(stream, expr->u.sum.expr);
+                fprintf(stream, ")");
+            }
+            break;
         case CLAPE_EXPR_FIELD:
             fprintf(stream, ".%s(", expr->u.field.name);
             clape_print_expr(stream, expr->u.field.value);
@@ -2481,7 +2943,67 @@ void clape_print_program(clape_program_t *const program) {
 
 static void clape_free_pattern(clape_pattern_t *pat);
 
-static void clape_free_type(clape_type_t *type) {
+static clape_type_t clape_type_clone(const clape_type_t *const type) {
+    switch (type->tag) {
+        case CLAPE_TYPE_PRODUCT: {
+            clape_arr_t *fields = NULL;
+            if (type->u.product.fields) {
+                fields = clape_arr_create(sizeof(clape_product_field_t), 0);
+                for (size_t i = 0; i < type->u.product.fields->len; i++) {
+                    clape_product_field_t *const src = ACCESS_ARR_AT(    //
+                        clape_product_field_t, type->u.product.fields, i //
+                    );
+                    clape_product_field_t f = {
+                        .name = strdup(src->name),
+                        .type = clape_type_clone(&src->type),
+                    };
+                    clape_arr_append(sizeof(clape_product_field_t), &fields, &f);
+                }
+            }
+            return (clape_type_t){
+                .tag = CLAPE_TYPE_PRODUCT,
+                .u.product = {.fields = fields},
+            };
+        }
+        case CLAPE_TYPE_SUM: {
+            clape_arr_t *variants = NULL;
+            if (type->u.sum.variants) {
+                variants = clape_arr_create(sizeof(clape_sum_variant_t), 0);
+                for (size_t i = 0; i < type->u.sum.variants->len; i++) {
+                    clape_sum_variant_t *const src = ACCESS_ARR_AT(  //
+                        clape_sum_variant_t, type->u.sum.variants, i //
+                    );
+                    clape_sum_variant_t v = {
+                        .name = strdup(src->name),
+                        .has_type = src->has_type,
+                    };
+                    if (src->has_type) {
+                        v.type = clape_type_clone(&src->type);
+                    }
+                    clape_arr_append(sizeof(clape_sum_variant_t), &variants, &v);
+                }
+            }
+            return (clape_type_t){
+                .tag = CLAPE_TYPE_SUM,
+                .u.sum = {.variants = variants},
+            };
+        }
+        case CLAPE_TYPE_FUNC: {
+            clape_type_t *const param = malloc(sizeof(clape_type_t));
+            *param = clape_type_clone(type->u.func.param);
+            clape_type_t *const ret = malloc(sizeof(clape_type_t));
+            *ret = clape_type_clone(type->u.func.ret);
+            return (clape_type_t){
+                .tag = CLAPE_TYPE_FUNC,
+                .u.func = {.param = param, .ret = ret},
+            };
+        }
+        default:
+            return (clape_type_t){.tag = type->tag};
+    }
+}
+
+static void clape_free_type(clape_type_t *const type) {
     switch (type->tag) {
         case CLAPE_TYPE_PRODUCT:
             if (type->u.product.fields) {
@@ -2493,6 +3015,20 @@ static void clape_free_type(clape_type_t *type) {
                     clape_free_type(&f->type);
                 }
                 free(type->u.product.fields);
+            }
+            break;
+        case CLAPE_TYPE_SUM:
+            if (type->u.sum.variants) {
+                for (size_t i = 0; i < type->u.sum.variants->len; i++) {
+                    clape_sum_variant_t *const variant = ACCESS_ARR_AT( //
+                        clape_sum_variant_t, type->u.sum.variants, i    //
+                    );
+                    free(variant->name);
+                    if (variant->has_type) {
+                        clape_free_type(&variant->type);
+                    }
+                }
+                free(type->u.sum.variants);
             }
             break;
         case CLAPE_TYPE_FUNC:
@@ -2590,6 +3126,27 @@ static void clape_free_expr(clape_expr_t *expr) {
                 free(expr->u.product_type.fields);
             }
             break;
+        case CLAPE_EXPR_SUM_TYPE:
+            if (expr->u.sum_type.variants) {
+                for (size_t i = 0; i < expr->u.sum_type.variants->len; i++) {
+                    clape_sum_variant_t *const variant = ACCESS_ARR_AT(   //
+                        clape_sum_variant_t, expr->u.sum_type.variants, i //
+                    );
+                    free(variant->name);
+                    if (variant->has_type) {
+                        clape_free_type(&variant->type);
+                    }
+                }
+                free(expr->u.sum_type.variants);
+            }
+            break;
+        case CLAPE_EXPR_SUM:
+            free(expr->u.sum.constructor);
+            if (expr->u.sum.expr) {
+                clape_free_expr(expr->u.sum.expr);
+                free(expr->u.sum.expr);
+            }
+            break;
         case CLAPE_EXPR_FIELD:
             free(expr->u.field.name);
             clape_free_expr(expr->u.field.value);
@@ -2624,6 +3181,12 @@ static void clape_free_pattern(clape_pattern_t *pat) {
             clape_free_pattern(pat->u.cons.tail);
             free(pat->u.cons.head);
             free(pat->u.cons.tail);
+            break;
+        case CLAPE_PATTERN_SUM:
+            free(pat->u.sum.constructor);
+            if (pat->u.sum.var) {
+                free(pat->u.sum.var);
+            }
             break;
     }
 }
@@ -2693,6 +3256,26 @@ static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, c
                 default:
                     return NULL;
             }
+        case CLAPE_PATTERN_SUM: {
+            if (val.type.tag != CLAPE_TYPE_SUM)
+                return NULL;
+            if (strcmp(val.u.sum.constructor, pat->u.sum.constructor) != 0)
+                return NULL;
+            if (pat->u.sum.has_payload && !val.u.sum.value)
+                return NULL;
+            if (!pat->u.sum.has_payload && val.u.sum.value)
+                return NULL;
+            if (pat->u.sum.var) {
+                clape_env_t *const binding = malloc(sizeof(clape_env_t));
+                *binding = (clape_env_t){
+                    .name = strdup(pat->u.sum.var),
+                    .value = *val.u.sum.value,
+                    .next = env,
+                };
+                return binding;
+            }
+            return env;
+        }
         case CLAPE_PATTERN_CONS: {
             clape_value_t head_val;
             clape_value_t tail_val;
@@ -3109,9 +3692,21 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             exit(1);
         }
         case CLAPE_EXPR_PRODUCT_TYPE:
+        case CLAPE_EXPR_SUM_TYPE:
             return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
+        case CLAPE_EXPR_SUM: {
+            clape_value_t *payload = NULL;
+            if (expr->u.sum.expr) {
+                payload = malloc(sizeof(clape_value_t));
+                *payload = clape_eval(expr->u.sum.expr, env);
+            }
+            return (clape_value_t){
+                .type = {.tag = CLAPE_TYPE_SUM},
+                .u.sum = {.constructor = strdup(expr->u.sum.constructor), .value = payload},
+            };
+        }
         case CLAPE_EXPR_FIELD: {
-            clape_value_t val = clape_eval(expr->u.field.value, env);
+            const clape_value_t val = clape_eval(expr->u.field.value, env);
             clape_arr_t *fields = clape_arr_create(sizeof(clape_product_value_t), 0);
             clape_product_value_t pv = {
                 .name = strdup(expr->u.field.name),
@@ -3124,7 +3719,7 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             };
         }
         case CLAPE_EXPR_FIELD_ACCESS: {
-            clape_value_t obj = clape_eval(expr->u.field_access.expr, env);
+            const clape_value_t obj = clape_eval(expr->u.field_access.expr, env);
             if (obj.type.tag != CLAPE_TYPE_PRODUCT) {
                 fprintf(stderr, "Field access requires a product value\n");
                 exit(1);
@@ -3141,22 +3736,22 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
         case CLAPE_EXPR_TYPE:
             return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
         case CLAPE_EXPR_CALL: {
-            clape_value_t callee = clape_eval(expr->u.call.callee, env);
-            clape_value_t arg = clape_eval(expr->u.call.arg, env);
+            const clape_value_t callee = clape_eval(expr->u.call.callee, env);
+            const clape_value_t arg = clape_eval(expr->u.call.arg, env);
             if (callee.type.tag != CLAPE_TYPE_FUNC) {
                 fprintf(stderr, "Attempted to call a non-function value\n");
                 exit(1);
             }
-            clape_fn_t *fn = callee.u.fn;
+            clape_fn_t *const fn = callee.u.fn;
 
             if (fn->is_builtin) {
                 return fn->builtin_fn(arg);
             }
 
-            size_t idx = fn->next_param_index;
-            clape_param_t *param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
+            const size_t idx = fn->next_param_index;
+            clape_param_t *const param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
 
-            clape_env_t *new_closure = malloc(sizeof(clape_env_t));
+            clape_env_t *const new_closure = malloc(sizeof(clape_env_t));
             *new_closure = (clape_env_t){
                 .name = strdup(param->name),
                 .value = arg,
@@ -3166,7 +3761,7 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             if (idx + 1 == fn->params->len) {
                 return clape_eval(fn->body, new_closure);
             }
-            clape_fn_t *partial = malloc(sizeof(clape_fn_t));
+            clape_fn_t *const partial = malloc(sizeof(clape_fn_t));
             *partial = (clape_fn_t){
                 .is_builtin = false,
                 .params = fn->params,
@@ -3277,6 +3872,42 @@ static clape_value_t clape_builtin_print(clape_value_t arg) {
             printf("\n");
             break;
         }
+        case CLAPE_TYPE_SUM: {
+            printf(".%s", arg.u.sum.constructor);
+            if (arg.u.sum.value) {
+                printf("(");
+                const clape_value_t sum_value = *arg.u.sum.value;
+                switch (sum_value.type.tag) {
+                    case CLAPE_TYPE_INT:
+                        printf("%li", sum_value.u.ival);
+                        break;
+                    case CLAPE_TYPE_FLOAT:
+                        printf("%g", sum_value.u.fval);
+                        break;
+                    case CLAPE_TYPE_BOOL:
+                        printf("%s", sum_value.u.bval ? "true" : "false");
+                        break;
+                    case CLAPE_TYPE_STRING:
+                        printf("\"%s\"", sum_value.u.sval);
+                        break;
+                    case CLAPE_TYPE_CHAR:
+                        printf("'%c'", sum_value.u.cval);
+                        break;
+                    case CLAPE_TYPE_LIST:
+                        printf("[...]");
+                        break;
+                    case CLAPE_TYPE_PRODUCT:
+                        printf("<product>");
+                        break;
+                    default:
+                        printf("<value>");
+                        break;
+                }
+                printf(")");
+            }
+            printf("\n");
+            break;
+        }
     }
     return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
 }
@@ -3319,6 +3950,16 @@ static void clape_env_free(clape_env_t *env) {
                 }
             }
             free(env->value.u.product);
+        } else if (env->value.type.tag == CLAPE_TYPE_SUM) {
+            free(env->value.u.sum.constructor);
+            if (env->value.u.sum.value) {
+                if (env->value.u.sum.value->type.tag == CLAPE_TYPE_STRING) {
+                    free(env->value.u.sum.value->u.sval);
+                } else if (env->value.u.sum.value->type.tag == CLAPE_TYPE_LIST) {
+                    clape_free_list_value(env->value.u.sum.value->u.list);
+                }
+                free(env->value.u.sum.value);
+            }
         }
         free(env);
         env = next;
@@ -3329,21 +3970,25 @@ void clape_interpret(clape_program_t *const program) {
     clape_env_t *env = NULL;
 
     for (size_t i = 0; i < program->statements->len; i++) {
-        clape_stmt_t *stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
+        clape_stmt_t *const stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
 
         switch (stmt->tag) {
             case CLAPE_STMT_LET: {
-                clape_value_t val = clape_eval(&stmt->u.let.expr, env);
-                if (val.type.tag == CLAPE_TYPE_UNIT &&
-                    stmt->u.let.expr.tag == CLAPE_EXPR_PRODUCT_TYPE) {
-                    // Product type binding: no runtime value
+                const clape_value_t val = clape_eval(&stmt->u.let.expr, env);
+                const bool is_type = val.type.tag == CLAPE_TYPE_UNIT;
+                const bool is_product_type = is_type //
+                    && stmt->u.let.expr.tag == CLAPE_EXPR_PRODUCT_TYPE;
+                const bool is_sum_type = is_type //
+                    && stmt->u.let.expr.tag == CLAPE_EXPR_SUM_TYPE;
+                if (is_product_type || is_sum_type) {
+                    // Type binding: no runtime value
                     break;
                 }
                 if (strcmp(stmt->u.let.name, "_") == 0) {
                     // Discard result for side-effect calls
                     break;
                 }
-                clape_env_t *binding = malloc(sizeof(clape_env_t));
+                clape_env_t *const binding = malloc(sizeof(clape_env_t));
                 *binding = (clape_env_t){
                     .name = strdup(stmt->u.let.name),
                     .value = val,
@@ -3369,7 +4014,7 @@ void clape_interpret(clape_program_t *const program) {
                     fprintf(stderr, "Unknown module: %s\n", stmt->u.use.module);
                     exit(1);
                 }
-                clape_fn_t *print_fn = malloc(sizeof(clape_fn_t));
+                clape_fn_t *const print_fn = malloc(sizeof(clape_fn_t));
                 *print_fn = (clape_fn_t){
                     .is_builtin = true,
                     .params = NULL,
@@ -3379,7 +4024,7 @@ void clape_interpret(clape_program_t *const program) {
                     .next_param_index = 0,
                     .closure = NULL,
                 };
-                clape_env_t *binding = malloc(sizeof(clape_env_t));
+                clape_env_t *const binding = malloc(sizeof(clape_env_t));
                 *binding = (clape_env_t){
                     .name = strdup("print"),
                     .value =
