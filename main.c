@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 typedef struct Options {
     char *file;
@@ -20,19 +19,6 @@ void print_usage(FILE *const stream) {
         "Available Options:\n"               //
         "  -h, --help           Show help\n" //
     );
-}
-
-bool is_valid_file_path(const char *path) {
-    struct stat st;
-
-    // Attempt to get file status
-    if (stat(path, &st) != 0) {
-        // Path does not exist or error occurred
-        return false;
-    }
-
-    // Check if it is a regular file (not a directory, device, etc.)
-    return S_ISREG(st.st_mode);
 }
 
 int parse_command_line_args(int argc, char *args[]) {
@@ -55,37 +41,6 @@ int parse_command_line_args(int argc, char *args[]) {
         return 1;
     }
     return 0;
-}
-
-char *load_file(const char *path) {
-    FILE *file = fopen(path, "rb");
-    if (!file) {
-        return NULL;
-    }
-
-    // 1. Get file size
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    // 2. Allocate memory (+1 for null terminator)
-    char *buffer = malloc(size + 1);
-    if (!buffer) {
-        fclose(file);
-        return NULL;
-    }
-
-    // 3. Read file into buffer
-    if (fread(buffer, 1, size, file) != (size_t)size) {
-        free(buffer);
-        fclose(file);
-        return NULL;
-    }
-
-    // Add null-terminator to the string
-    buffer[size] = '\0';
-    fclose(file);
-    return buffer;
 }
 
 int main(int argc, char *args[]) {

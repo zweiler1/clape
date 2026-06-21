@@ -97,6 +97,69 @@ static inline void _defer_cleanup(struct _defer_ctx *ctx) {
     struct _defer_ctx _DEFER_NAME(_defer_var_, __COUNTER__)                                        \
         __attribute__((cleanup(_defer_cleanup))) = {(void (*)(void *))(fn), (void *)(ptr)}
 
+/// @function `is_valid_file_path`
+/// @brief Checks whether the given file path is valid and exists
+///
+/// @param `path` The path to check if it's valid
+/// @return `bool` Whether the given path is valid
+[[nodiscard]] bool is_valid_file_path(const char *path);
+
+/// @function `load_file`
+/// @brief Loads the given file path into a newly allocated string. Callee owns the returned value
+///
+/// @param `path` The path to the file to load
+/// @return `char *` The loaded file, callee owns it
+[[nodiscard]] char *load_file(const char *path);
+
+#ifdef CLAPE_IMPLEMENTATION
+#include <sys/stat.h>
+
+bool is_valid_file_path(const char *path) {
+    struct stat st;
+
+    // Attempt to get file status
+    if (stat(path, &st) != 0) {
+        // Path does not exist or error occurred
+        return false;
+    }
+
+    // Check if it is a regular file (not a directory, device, etc.)
+    return S_ISREG(st.st_mode);
+}
+
+char *load_file(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        return NULL;
+    }
+
+    // 1. Get file size
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    // 2. Allocate memory (+1 for null terminator)
+    char *buffer = malloc(size + 1);
+    if (!buffer) {
+        fclose(file);
+        return NULL;
+    }
+
+    // 3. Read file into buffer
+    if (fread(buffer, 1, size, file) != (size_t)size) {
+        free(buffer);
+        fclose(file);
+        return NULL;
+    }
+
+    // Add null-terminator to the string
+    buffer[size] = '\0';
+    fclose(file);
+    return buffer;
+}
+
+#endif
+
 // ------ TYPES ------
 
 /// @enum `clape_type_e`
