@@ -3311,6 +3311,94 @@ static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, c
     return NULL;
 }
 
+static const char *clape_type_tag_name(clape_type_e tag) {
+    switch (tag) {
+        case CLAPE_TYPE_INT:
+            return "Int";
+        case CLAPE_TYPE_FLOAT:
+            return "Float";
+        case CLAPE_TYPE_BOOL:
+            return "Bool";
+        case CLAPE_TYPE_FUNC:
+            return "Function";
+        case CLAPE_TYPE_STRING:
+            return "String";
+        case CLAPE_TYPE_CHAR:
+            return "Char";
+        case CLAPE_TYPE_LIST:
+            return "List";
+        case CLAPE_TYPE_UNIT:
+            return "Unit";
+        case CLAPE_TYPE_PRODUCT:
+            return "Product";
+        case CLAPE_TYPE_SUM:
+            return "Sum";
+    }
+    return "Unknown";
+}
+
+static bool clape_type_is_compatible(const clape_value_t *value, const clape_type_t *type) {
+    switch (type->tag) {
+        case CLAPE_TYPE_INT:
+        case CLAPE_TYPE_FLOAT:
+        case CLAPE_TYPE_BOOL:
+        case CLAPE_TYPE_STRING:
+        case CLAPE_TYPE_CHAR:
+        case CLAPE_TYPE_UNIT:
+            return value->type.tag == type->tag;
+        case CLAPE_TYPE_LIST:
+            return value->type.tag == CLAPE_TYPE_LIST;
+        case CLAPE_TYPE_FUNC:
+            return value->type.tag == CLAPE_TYPE_FUNC;
+        case CLAPE_TYPE_PRODUCT: {
+            if (value->type.tag != CLAPE_TYPE_PRODUCT) {
+                return false;
+            }
+            for (size_t i = 0; i < type->u.product.fields->len; i++) {
+                clape_product_field_t *const declared = ACCESS_ARR_AT( //
+                    clape_product_field_t, type->u.product.fields, i   //
+                );
+                bool found = false;
+                for (size_t j = 0; j < value->u.product->len; j++) {
+                    clape_product_value_t *const field = ACCESS_ARR_AT( //
+                        clape_product_value_t, value->u.product, j      //
+                    );
+                    if (strcmp(field->name, declared->name) == 0) {
+                        if (!clape_type_is_compatible(&field->value, &declared->type)) {
+                            return false;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case CLAPE_TYPE_SUM: {
+            if (value->type.tag != CLAPE_TYPE_SUM) {
+                return false;
+            }
+            for (size_t i = 0; i < type->u.sum.variants->len; i++) {
+                clape_sum_variant_t *const variant = ACCESS_ARR_AT( //
+                    clape_sum_variant_t, type->u.sum.variants, i    //
+                );
+                if (strcmp(variant->name, value->u.sum.constructor) != 0) {
+                    continue;
+                }
+                if (variant->has_type && value->u.sum.value) {
+                    return clape_type_is_compatible(value->u.sum.value, &variant->type);
+                }
+                return variant->has_type == (value->u.sum.value != NULL);
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
 static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
     // Two helper macros to greatly reduce code duplication
 #define CMP_NUMERIC(op)                                                                            \
@@ -3703,6 +3791,12 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             const size_t idx = fn->next_param_index;
             clape_param_t *const param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
 
+            if (!clape_type_is_compatible(&arg, &param->type)) {
+                fprintf(stderr, "Type error: parameter '%s' expected %s, got %s\n", param->name,
+                    clape_type_tag_name(param->type.tag), clape_type_tag_name(arg.type.tag));
+                exit(1);
+            }
+
             clape_env_t *const new_closure = malloc(sizeof(clape_env_t));
             *new_closure = (clape_env_t){
                 .name = strdup(param->name),
@@ -3711,7 +3805,14 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             };
 
             if (idx + 1 == fn->params->len) {
-                return clape_eval(fn->body, new_closure);
+                clape_value_t result = clape_eval(fn->body, new_closure);
+                if (!clape_type_is_compatible(&result, &fn->return_type)) {
+                    fprintf(stderr, "Type error: function returned %s, expected %s\n",
+                        clape_type_tag_name(result.type.tag),
+                        clape_type_tag_name(fn->return_type.tag));
+                    exit(1);
+                }
+                return result;
             }
             clape_fn_t *const partial = malloc(sizeof(clape_fn_t));
             *partial = (clape_fn_t){
