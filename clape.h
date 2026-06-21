@@ -3312,6 +3312,53 @@ static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, c
 }
 
 static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
+    // Two helper macros to greatly reduce code duplication
+#define CMP_NUMERIC(op)                                                                            \
+    do {                                                                                           \
+        bool _r = false;                                                                           \
+        switch (lhs.type.tag) {                                                                    \
+            case CLAPE_TYPE_INT:                                                                   \
+                _r = lhs.u.ival op rhs.u.ival;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_FLOAT:                                                                 \
+                _r = lhs.u.fval op rhs.u.fval;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_CHAR:                                                                  \
+                _r = lhs.u.cval op rhs.u.cval;                                                     \
+                break;                                                                             \
+            default:                                                                               \
+                fprintf(stderr, "Comparison requires Int, Float, or Char\n");                      \
+                exit(1);                                                                           \
+        }                                                                                          \
+        return (clape_value_t){.type = {.tag = CLAPE_TYPE_BOOL}, .u.bval = _r};                    \
+    } while (0)
+
+#define CMP_EQUALITY(op)                                                                           \
+    do {                                                                                           \
+        bool _r = false;                                                                           \
+        switch (lhs.type.tag) {                                                                    \
+            case CLAPE_TYPE_INT:                                                                   \
+                _r = lhs.u.ival op rhs.u.ival;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_FLOAT:                                                                 \
+                _r = lhs.u.fval op rhs.u.fval;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_BOOL:                                                                  \
+                _r = lhs.u.bval op rhs.u.bval;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_STRING:                                                                \
+                _r = strcmp(lhs.u.sval, rhs.u.sval) op 0;                                          \
+                break;                                                                             \
+            case CLAPE_TYPE_CHAR:                                                                  \
+                _r = lhs.u.cval op rhs.u.cval;                                                     \
+                break;                                                                             \
+            default:                                                                               \
+                fprintf(stderr, "Equality not supported for this type\n");                         \
+                exit(1);                                                                           \
+        }                                                                                          \
+        return (clape_value_t){.type = {.tag = CLAPE_TYPE_BOOL}, .u.bval = _r};                    \
+    } while (0)
+
     switch (expr->tag) {
         case CLAPE_EXPR_LIT: {
             clape_value_t v = expr->u.lit;
@@ -3438,95 +3485,18 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                             };
                         }
                     }
-                case CLAPE_BINOP_LT: {
-                    bool result = false;
-                    if (lhs.type.tag == CLAPE_TYPE_INT)
-                        result = lhs.u.ival < rhs.u.ival;
-                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
-                        result = lhs.u.fval < rhs.u.fval;
-                    else if (lhs.type.tag == CLAPE_TYPE_CHAR)
-                        result = lhs.u.cval < rhs.u.cval;
-                    else {
-                        fprintf(stderr, "Comparison requires Int, Float, or Char\n");
-                        exit(1);
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_BOOL},
-                        .u.bval = result,
-                    };
-                }
-                case CLAPE_BINOP_GT: {
-                    bool result = false;
-                    if (lhs.type.tag == CLAPE_TYPE_INT)
-                        result = lhs.u.ival > rhs.u.ival;
-                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
-                        result = lhs.u.fval > rhs.u.fval;
-                    else if (lhs.type.tag == CLAPE_TYPE_CHAR)
-                        result = lhs.u.cval > rhs.u.cval;
-                    else {
-                        fprintf(stderr, "Comparison requires Int, Float, or Char\n");
-                        exit(1);
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_BOOL},
-                        .u.bval = result,
-                    };
-                }
-                case CLAPE_BINOP_LE: {
-                    bool result = false;
-                    if (lhs.type.tag == CLAPE_TYPE_INT)
-                        result = lhs.u.ival <= rhs.u.ival;
-                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
-                        result = lhs.u.fval <= rhs.u.fval;
-                    else if (lhs.type.tag == CLAPE_TYPE_CHAR)
-                        result = lhs.u.cval <= rhs.u.cval;
-                    else {
-                        fprintf(stderr, "Comparison requires Int, Float, or Char\n");
-                        exit(1);
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_BOOL},
-                        .u.bval = result,
-                    };
-                }
-                case CLAPE_BINOP_GE: {
-                    bool result = false;
-                    if (lhs.type.tag == CLAPE_TYPE_INT)
-                        result = lhs.u.ival >= rhs.u.ival;
-                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
-                        result = lhs.u.fval >= rhs.u.fval;
-                    else if (lhs.type.tag == CLAPE_TYPE_CHAR)
-                        result = lhs.u.cval >= rhs.u.cval;
-                    else {
-                        fprintf(stderr, "Comparison requires Int, Float, or Char\n");
-                        exit(1);
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_BOOL},
-                        .u.bval = result,
-                    };
-                }
-                case CLAPE_BINOP_EQ: {
-                    bool result = false;
-                    if (lhs.type.tag == CLAPE_TYPE_INT)
-                        result = lhs.u.ival == rhs.u.ival;
-                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
-                        result = lhs.u.fval == rhs.u.fval;
-                    else if (lhs.type.tag == CLAPE_TYPE_BOOL)
-                        result = lhs.u.bval == rhs.u.bval;
-                    else if (lhs.type.tag == CLAPE_TYPE_STRING)
-                        result = strcmp(lhs.u.sval, rhs.u.sval) == 0;
-                    else if (lhs.type.tag == CLAPE_TYPE_CHAR)
-                        result = lhs.u.cval == rhs.u.cval;
-                    else {
-                        fprintf(stderr, "Equality not supported for this type\n");
-                        exit(1);
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_BOOL},
-                        .u.bval = result,
-                    };
-                }
+                case CLAPE_BINOP_EQ:
+                    CMP_EQUALITY(==);
+                case CLAPE_BINOP_NE:
+                    CMP_EQUALITY(!=);
+                case CLAPE_BINOP_LT:
+                    CMP_NUMERIC(<);
+                case CLAPE_BINOP_LE:
+                    CMP_NUMERIC(<=);
+                case CLAPE_BINOP_GT:
+                    CMP_NUMERIC(>);
+                case CLAPE_BINOP_GE:
+                    CMP_NUMERIC(>=);
                 case CLAPE_BINOP_CONS: {
                     if (rhs.type.tag == CLAPE_TYPE_LIST) {
                         clape_cons_t *node = malloc(sizeof(clape_cons_t));
@@ -3595,28 +3565,9 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
                         .u.product = result,
                     };
                 }
-                case CLAPE_BINOP_NE: {
-                    bool result = false;
-                    if (lhs.type.tag == CLAPE_TYPE_INT)
-                        result = lhs.u.ival != rhs.u.ival;
-                    else if (lhs.type.tag == CLAPE_TYPE_FLOAT)
-                        result = lhs.u.fval != rhs.u.fval;
-                    else if (lhs.type.tag == CLAPE_TYPE_BOOL)
-                        result = lhs.u.bval != rhs.u.bval;
-                    else if (lhs.type.tag == CLAPE_TYPE_STRING)
-                        result = strcmp(lhs.u.sval, rhs.u.sval) != 0;
-                    else if (lhs.type.tag == CLAPE_TYPE_CHAR)
-                        result = lhs.u.cval != rhs.u.cval;
-                    else {
-                        fprintf(stderr, "Inequality not supported for this type\n");
-                        exit(1);
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_BOOL},
-                        .u.bval = result,
-                    };
-                }
             }
+#undef CMP_NUMERIC
+#undef CMP_EQUALITY
             __builtin_unreachable();
         }
         case CLAPE_EXPR_IF: {
