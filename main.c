@@ -15,11 +15,10 @@ Options options = (Options){
 
 void print_usage(FILE *const stream) {
     fprintf(stream,
-        "Usage: clape [OPTIONS]\n"                     //
-        "\n"                                           //
-        "Available Options:\n"                         //
-        "  -h, --help           Show help\n"           //
-        "  -f, --file <file>    The file to execute\n" //
+        "Usage: clape <file> [OPTIONS]\n"    //
+        "\n"                                 //
+        "Available Options:\n"               //
+        "  -h, --help           Show help\n" //
     );
 }
 
@@ -41,23 +40,14 @@ int parse_command_line_args(int argc, char *args[]) {
         if (strcmp(args[i], "-h") == 0 || strcmp(args[i], "--help") == 0) {
             print_usage(stdout);
             return 0;
-        } else if (strcmp(args[i], "-f") == 0 || strcmp(args[i], "--file") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(                                                              //
-                    stderr, "Error: Expected a <file> after the '%s' flag\n", args[i] //
-                );
-                print_usage(stderr);
-                return 1;
-            }
-            i++;
-            if (!is_valid_file_path(args[i])) {
-                fprintf(                                                                       //
-                    stderr, "Error: The given file '%s' does not exist or is invalid", args[i] //
-                );
-                return 1;
-            }
-            options.file = args[i];
         }
+        if (!is_valid_file_path(args[i])) {
+            fprintf(                                                                       //
+                stderr, "Error: The given file '%s' does not exist or is invalid", args[i] //
+            );
+            return 1;
+        }
+        options.file = args[i];
     }
     if (options.file == NULL) {
         fprintf(stderr, "Error: No file to run was passed to clape\n");
