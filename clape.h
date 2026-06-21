@@ -4183,15 +4183,24 @@ static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
             for (size_t i = 0; i < expr->u.block.stmts->len; i++) {
                 clape_stmt_t *s = ACCESS_ARR_AT(clape_stmt_t, expr->u.block.stmts, i);
                 clape_value_t val = clape_eval(&s->u.let.expr, block_env);
-                if (strcmp(s->u.let.name, "_") != 0) {
-                    clape_env_t *binding = malloc(sizeof(clape_env_t));
-                    *binding = (clape_env_t){
-                        .name = strdup(s->u.let.name),
-                        .value = val,
-                        .next = block_env,
-                    };
-                    block_env = binding;
+
+                if (strcmp(s->u.let.name, "_") == 0) {
+                    continue;
                 }
+                // Create new binding
+                clape_env_t *const binding = malloc(sizeof(clape_env_t));
+                *binding = (clape_env_t){
+                    .name = strdup(s->u.let.name),
+                    .value = val,
+                    .next = block_env,
+                };
+                if (val.type.tag == CLAPE_TYPE_FUNC && !val.u.fn->is_builtin) {
+                    // Make the function see itself in its closure
+                    clape_env_t *const self_binding = malloc(sizeof(clape_env_t));
+                    *self_binding = *binding;
+                    val.u.fn->closure = self_binding;
+                }
+                block_env = binding;
             }
             if (expr->u.block.return_expr) {
                 return clape_eval(expr->u.block.return_expr, block_env);
