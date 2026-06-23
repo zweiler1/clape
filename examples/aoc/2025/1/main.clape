@@ -1,0 +1,74 @@
+use Print
+use File
+
+let str_to_int = (str: String) -> Int {
+    let go = (str: String, acc: Int) -> Int {
+        match str {
+            [] => acc;
+            head :: tail => go tail {acc * 10 + {head - '\0'}}
+        }
+    };
+    go str 0
+}
+
+let parse_numbers = (list: [String]) -> [Int] {
+    match list {
+        [] => [];
+        head :: tail => match head {
+            [] => 0;
+            first :: rest => str_to_int rest * {
+                1 if first == 'R' else {-1}
+            }
+        } :: parse_numbers tail
+    }
+}
+
+let mod = (x: Int, y: Int) -> Int {
+    {x % y + y} % y
+}
+
+let part_1 = (numbers: [Int]) -> Unit {
+    let go = (nums: [Int], dial: Int, count: Int) -> Unit {
+        match nums {
+            [] => {
+                let _ = print "part_1: ";
+                print count
+            };
+            head :: tail => {
+                let new_dial = mod {dial + head} 100;
+                let new_count = count + {1 if new_dial == 0 else 0};
+                go tail new_dial new_count
+            }
+        }
+    };
+    go numbers 50 0
+}
+
+let part_2 = (numbers: [Int]) -> Unit {
+    let go = (nums: [Int], dial: Int, count: Int) -> Unit {
+        match nums {
+            [] => {
+                let _ = print "part_2: ";
+                print count
+            };
+            head :: tail => {
+                let sum = {dial + head};
+                let cond1 = {dial > 0 and head < 0 and sum < 0};
+                let count1 = count + {1 if cond1 else 0};
+                let abs_val = sum if sum >= 0 else {-sum};
+                let count2 = count1 + {{abs_val - 1} / 100};
+                let new_dial = mod sum 100;
+                let new_count = count2 + {1 if new_dial == 0 else 0};
+                go tail new_dial new_count
+            }
+        }
+    };
+    go numbers 50 0
+}
+
+let input = load_file "input.txt"
+let numbers = parse_numbers input
+
+let _ = part_1 numbers
+let _ = part_2 numbers
+
