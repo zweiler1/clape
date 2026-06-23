@@ -4312,6 +4312,8 @@ static void clape_free_list_value(clape_cons_t *list) {
         if (--list->arc == 0) {
             clape_free_value(list->head);
             free(list);
+        } else {
+            return;
         }
         list = next;
     }
