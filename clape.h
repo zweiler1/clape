@@ -3945,7 +3945,7 @@ static clape_generic_binding_t *clape_infer_generic_types( //
                 if (!clape_type_is_compatible(value, &existing->type, &genv)) {
                     fprintf(stderr, "Type error: conflicting generic inference for '%s'\n",
                         declared->u.generic);
-                    exit(1);
+                    return NULL;
                 }
                 return genv;
             }
@@ -4549,7 +4549,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                             r = lhs.u.ival / rhs.u.ival;
                             break;
                         default:
-                            exit(1);
+                            return false;
                     }
                     clape_push_value(vm,
                         (clape_value_t){
@@ -4574,7 +4574,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                             r = lhs.u.fval / rhs.u.fval;
                             break;
                         default:
-                            exit(1);
+                            return false;
                     }
                     clape_push_value(vm,
                         (clape_value_t){
