@@ -4394,6 +4394,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
             e->value.type.tag == CLAPE_TYPE_FUNC ? ":func" : "");
     }
     fprintf(stderr, "}\n");
+    clape_pop_frame(vm);
     return false;
 }
 
@@ -4410,6 +4411,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
     clape_value_t *const result = clape_peek_value(vm);
     if (result->type.tag != CLAPE_TYPE_BOOL) {
         fprintf(stderr, "not requires a Bool operand\n");
+        clape_pop_frame(vm);
         return false;
     }
     *result = (clape_value_t){
@@ -4497,6 +4499,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
             && rhs.type.tag == CLAPE_TYPE_STRING;
         if (!is_str_append && !is_str_prepend) {
             fprintf(stderr, "Type mismatch in binary operation\n");
+            clape_pop_frame(vm);
             return false;
         }
     }
@@ -4506,6 +4509,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
         case CLAPE_BINOP_OR:
             if (lhs.type.tag != CLAPE_TYPE_BOOL || rhs.type.tag != CLAPE_TYPE_BOOL) {
                 fprintf(stderr, "and/or require Bool operands\n");
+                clape_pop_frame(vm);
                 return false;
             }
             clape_push_value(vm,
@@ -4565,11 +4569,13 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
         case CLAPE_BINOP_DIV:
             if (lhs.type.tag != rhs.type.tag) {
                 fprintf(stderr, "Type mismatch in arithmetic: cannot mix types\n");
+                clape_pop_frame(vm);
                 return false;
             }
             switch (lhs.type.tag) {
                 default:
                     fprintf(stderr, "Arithmetic requires Int or Float\n");
+                    clape_pop_frame(vm);
                     return false;
                 case CLAPE_TYPE_CHAR: {
                     int64_t r;
@@ -4587,6 +4593,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                             r = (int64_t)lhs.u.cval / (int64_t)rhs.u.cval;
                             break;
                         default:
+                            clape_pop_frame(vm);
                             return false;
                     }
                     clape_push_value(vm,
@@ -4612,6 +4619,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                             r = lhs.u.ival / rhs.u.ival;
                             break;
                         default:
+                            clape_pop_frame(vm);
                             return false;
                     }
                     clape_push_value(vm,
@@ -4762,6 +4770,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
         const clape_value_t cond = clape_pop_value(vm);
         if (cond.type.tag != CLAPE_TYPE_BOOL) {
             fprintf(stderr, "if condition must be Bool\n");
+            clape_pop_frame(vm);
             return false;
         }
         (*stage)++;
@@ -4853,6 +4862,7 @@ static void clape_eval_expr_list(clape_vm_t *const vm) {
             }
         }
         fprintf(stderr, "Non-exhaustive match\n");
+        clape_pop_frame(vm);
         return false;
     }
     // We evaluated the expression from the correct arm, only thing left to do is to pop the frame
@@ -4924,6 +4934,7 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
     const clape_value_t obj = clape_pop_value(vm);
     if (obj.type.tag != CLAPE_TYPE_PRODUCT) {
         fprintf(stderr, "Field access requires a product value\n");
+        clape_pop_frame(vm);
         return false;
     }
     for (size_t i = 0; i < obj.u.product->len; i++) {
@@ -4935,6 +4946,7 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         }
     }
     fprintf(stderr, "No such field '%s' in product\n", expr->u.field_access.name);
+    clape_pop_frame(vm);
     return false;
 }
 
@@ -4960,6 +4972,7 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         const clape_value_t *callee = arg - 1;
         if (callee->type.tag != CLAPE_TYPE_FUNC) {
             fprintf(stderr, "Attempted to call a non-function value\n");
+            clape_pop_frame(vm);
             return false;
         }
         clape_fn_t *const fn = callee->u.fn;
@@ -4980,6 +4993,7 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
             fprintf(stderr, "Type error: parameter '%s' expected %s, got %s\n", param->name,
                 clape_type_tag_name(param->type.tag), clape_type_tag_name(arg->type.tag));
             clape_genv_free(genv);
+            clape_pop_frame(vm);
             return false;
         }
 
@@ -5034,6 +5048,7 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         fprintf(stderr, "Type error: function returned %s, expected %s\n",
             clape_type_tag_name(result.type.tag), clape_type_tag_name(fn->return_type.tag));
         clape_genv_free(genv);
+        clape_pop_frame(vm);
         return false;
     }
     clape_genv_free(genv);
