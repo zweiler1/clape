@@ -727,6 +727,10 @@ typedef struct clape_frame_t {
     // @var `prev`
     // @brief A pointer to the previous frame, needed to "go back" for value proposition
     struct clape_frame_t *prev;
+
+    /// @var `owns_env`
+    /// @brief Whether this frame owns its env chain and should free it on pop
+    bool owns_env;
 } clape_frame_t;
 
 /// @struct `clape_vm_t`
@@ -4244,16 +4248,14 @@ static bool clape_eval_stmt_use(clape_stmt_t *const stmt, clape_env_t **env) {
  * ====== STMT EVAL END ======
  */
 
-static clape_value_t clape_clone_value(clape_value_t val);
-
 static clape_cons_t *clape_clone_cons(clape_cons_t *list) {
-    if (list == NULL)
+    if (list == NULL) {
         return NULL;
-    clape_cons_t *clone = malloc(sizeof(clape_cons_t));
-    clone->head = clape_clone_value(list->head);
-    clone->tail = clape_clone_cons(list->tail);
-    clone->arc = 1;
-    return clone;
+    }
+    for (clape_cons_t *n = list; n; n = n->tail) {
+        n->arc++;
+    }
+    return list;
 }
 
 static clape_value_t clape_clone_value(clape_value_t val) {
@@ -4302,18 +4304,46 @@ static clape_value_t clape_clone_value(clape_value_t val) {
     }
 }
 
+static void clape_free_value(clape_value_t val);
+
 static void clape_free_list_value(clape_cons_t *list) {
     while (list != NULL) {
         clape_cons_t *const next = list->tail;
         if (--list->arc == 0) {
-            if (list->head.type.tag == CLAPE_TYPE_STRING) {
-                free(list->head.u.sval);
-            } else if (list->head.type.tag == CLAPE_TYPE_LIST) {
-                clape_free_list_value(list->head.u.list);
-            }
+            clape_free_value(list->head);
             free(list);
         }
         list = next;
+    }
+}
+
+static void clape_free_value(clape_value_t val) {
+    switch (val.type.tag) {
+        case CLAPE_TYPE_STRING:
+            free(val.u.sval);
+            break;
+        case CLAPE_TYPE_LIST:
+            clape_free_list_value(val.u.list);
+            break;
+        case CLAPE_TYPE_FUNC:
+            break;
+        case CLAPE_TYPE_PRODUCT:
+            for (size_t i = 0; i < val.u.product->len; i++) {
+                clape_product_value_t *f = ACCESS_ARR_AT(clape_product_value_t, val.u.product, i);
+                free(f->name);
+                clape_free_value(f->value);
+            }
+            free(val.u.product);
+            break;
+        case CLAPE_TYPE_SUM:
+            free(val.u.sum.constructor);
+            if (val.u.sum.value) {
+                clape_free_value(*val.u.sum.value);
+                free(val.u.sum.value);
+            }
+            break;
+        default:
+            break;
     }
 }
 
@@ -4321,36 +4351,17 @@ static void clape_env_free(clape_env_t *env) {
     while (env != NULL) {
         clape_env_t *const next = env->next;
         free(env->name);
-        if (env->value.type.tag == CLAPE_TYPE_FUNC) {
-            // copied
-        } else if (env->value.type.tag == CLAPE_TYPE_STRING) {
-            free(env->value.u.sval);
-        } else if (env->value.type.tag == CLAPE_TYPE_LIST) {
-            clape_free_list_value(env->value.u.list);
-        } else if (env->value.type.tag == CLAPE_TYPE_PRODUCT) {
-            for (size_t i = 0; i < env->value.u.product->len; i++) {
-                clape_product_value_t *f = ACCESS_ARR_AT(          //
-                    clape_product_value_t, env->value.u.product, i //
-                );
-                free(f->name);
-                if (f->value.type.tag == CLAPE_TYPE_STRING) {
-                    free(f->value.u.sval);
-                } else if (f->value.type.tag == CLAPE_TYPE_LIST) {
-                    clape_free_list_value(f->value.u.list);
-                }
-            }
-            free(env->value.u.product);
-        } else if (env->value.type.tag == CLAPE_TYPE_SUM) {
-            free(env->value.u.sum.constructor);
-            if (env->value.u.sum.value) {
-                if (env->value.u.sum.value->type.tag == CLAPE_TYPE_STRING) {
-                    free(env->value.u.sum.value->u.sval);
-                } else if (env->value.u.sum.value->type.tag == CLAPE_TYPE_LIST) {
-                    clape_free_list_value(env->value.u.sum.value->u.list);
-                }
-                free(env->value.u.sum.value);
-            }
-        }
+        clape_free_value(env->value);
+        free(env);
+        env = next;
+    }
+}
+
+static void clape_env_free_to(clape_env_t *env, const clape_env_t *const stop) {
+    while (env != NULL && env != stop) {
+        clape_env_t *const next = env->next;
+        free(env->name);
+        clape_free_value(env->value);
         free(env);
         env = next;
     }
@@ -4379,11 +4390,15 @@ static void clape_push_frame(clape_vm_t *const vm, clape_expr_t *const expr) {
         .genv = old_top ? old_top->genv : NULL,
         .eval_stage = 0,
         .prev = old_top,
+        .owns_env = false,
     };
 }
 
 static void clape_pop_frame(clape_vm_t *const vm) {
     clape_frame_t *to_pop = vm->top;
+    if (to_pop->owns_env) {
+        clape_env_free(to_pop->env);
+    }
     vm->top = to_pop->prev;
     free(to_pop);
 }
@@ -4835,7 +4850,9 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
             return false;
         }
         (*stage)++;
-        if (cond.u.bval) {
+        const bool cond_val = cond.u.bval;
+        clape_free_value(cond);
+        if (cond_val) {
             // Evaluate the true branch
             clape_push_frame(vm, vm->top->expr->u.if_.then_branch);
         } else {
@@ -4918,10 +4935,18 @@ static void clape_eval_expr_list(clape_vm_t *const vm) {
             if (arm_env != NULL) {
                 (*stage)++;
                 clape_push_frame(vm, &arm->body);
+                if (arm->body.tag == CLAPE_EXPR_BLOCK) {
+                    clape_env_free(vm->top->env);
+                } else {
+                    vm->top->owns_env = true;
+                }
                 vm->top->env = clape_env_clone(arm_env);
+                clape_free_value(scrutinee);
+                clape_env_free_to(arm_env, vm->top->prev->env);
                 return true;
             }
         }
+        clape_free_value(scrutinee);
         fprintf(stderr, "Non-exhaustive match\n");
         clape_pop_frame(vm);
         return false;
@@ -5039,9 +5064,10 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         clape_fn_t *const fn = callee->u.fn;
 
         if (fn->is_builtin) {
-            [[maybe_unused]] const clape_value_t arg_garbage = clape_pop_value(vm);
+            const clape_value_t arg_garbage = clape_pop_value(vm);
             [[maybe_unused]] const clape_value_t callee_garbage = clape_pop_value(vm);
             clape_push_value(vm, fn->builtin_fn(*arg));
+            clape_free_value(arg_garbage);
             clape_pop_frame(vm);
             return true;
         }
@@ -5054,6 +5080,10 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
             fprintf(stderr, "Type error: parameter '%s' expected %s, got %s\n", param->name,
                 clape_type_tag_name(param->type.tag), clape_type_tag_name(arg->type.tag));
             clape_genv_free(genv);
+            if (vm->top->owns_env) {
+                clape_env_free(vm->top->env);
+                vm->top->owns_env = false;
+            }
             clape_pop_frame(vm);
             return false;
         }
@@ -5068,8 +5098,12 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         if (idx + 1 == fn->params->len) {
             // Full application — store state, push body, defer to stage 3
             (*stage)++;
-            vm->top->genv = genv;
+            if (vm->top->owns_env) {
+                clape_env_free(vm->top->env);
+            }
             vm->top->env = new_closure;
+            vm->top->owns_env = true;
+            vm->top->genv = genv;
             clape_push_frame(vm, fn->body);
             return true;
         }
@@ -5094,6 +5128,10 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
                 .type = {.tag = CLAPE_TYPE_FUNC},
                 .u.fn = partial,
             });
+        if (vm->top->owns_env) {
+            clape_env_free(vm->top->env);
+            vm->top->owns_env = false;
+        }
         clape_pop_frame(vm);
         return true;
     }
@@ -5109,11 +5147,31 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         fprintf(stderr, "Type error: function returned %s, expected %s\n",
             clape_type_tag_name(result.type.tag), clape_type_tag_name(fn->return_type.tag));
         clape_genv_free(genv);
+        clape_env_free_to(vm->top->env, fn->closure);
+        vm->top->owns_env = false;
+        if (fn->next_param_index > 0) {
+            clape_env_t *stop = fn->closure;
+            for (size_t i = 0; i < fn->next_param_index && stop; i++) {
+                stop = stop->next;
+            }
+            clape_env_free_to(fn->closure, stop);
+            free(fn);
+        }
         clape_pop_frame(vm);
         return false;
     }
     clape_genv_free(genv);
     clape_push_value(vm, result);
+    clape_env_free_to(vm->top->env, fn->closure);
+    vm->top->owns_env = false;
+    if (fn->next_param_index > 0) {
+        clape_env_t *stop = fn->closure;
+        for (size_t i = 0; i < fn->next_param_index && stop; i++) {
+            stop = stop->next;
+        }
+        clape_env_free_to(fn->closure, stop);
+        free(fn);
+    }
     clape_pop_frame(vm);
     return true;
 }
@@ -5257,7 +5315,13 @@ clape_value_t clape_interpret(clape_program_t *const program) {
             }
         }
     }
-    return clape_pop_value(&vm);
+    clape_value_t result = clape_pop_value(&vm);
+    for (size_t i = 0; i < vm.values->len; i++) {
+        clape_free_value(*ACCESS_ARR_AT(clape_value_t, vm.values, i));
+    }
+    free(vm.values);
+    free(main_expr);
+    return result;
 }
 
 #endif
