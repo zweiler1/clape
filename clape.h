@@ -4489,8 +4489,16 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
     const clape_value_t lhs = clape_pop_value(vm);
     const clape_binop_e op = expr->u.binop.op;
     if (lhs.type.tag != rhs.type.tag && op != CLAPE_BINOP_CONS) {
-        fprintf(stderr, "Type mismatch in binary operation\n");
-        return false;
+        const bool is_str_append = op == CLAPE_BINOP_ADD //
+            && lhs.type.tag == CLAPE_TYPE_STRING         //
+            && rhs.type.tag == CLAPE_TYPE_CHAR;
+        const bool is_str_prepend = op == CLAPE_BINOP_ADD //
+            && lhs.type.tag == CLAPE_TYPE_CHAR            //
+            && rhs.type.tag == CLAPE_TYPE_STRING;
+        if (!is_str_append && !is_str_prepend) {
+            fprintf(stderr, "Type mismatch in binary operation\n");
+            return false;
+        }
     }
 
     switch (op) {
@@ -4509,11 +4517,41 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
             break;
         case CLAPE_BINOP_ADD:
             if (lhs.type.tag == CLAPE_TYPE_STRING && rhs.type.tag == CLAPE_TYPE_STRING) {
-                size_t llen = strlen(lhs.u.sval);
-                size_t rlen = strlen(rhs.u.sval);
-                char *result = malloc(llen + rlen + 1);
+                const size_t llen = strlen(lhs.u.sval);
+                const size_t rlen = strlen(rhs.u.sval);
+                const size_t result_len = llen + rlen;
+                char *const result = malloc(result_len + 1);
                 memcpy(result, lhs.u.sval, llen);
                 memcpy(result + llen, rhs.u.sval, rlen + 1);
+                result[result_len] = '\0';
+                clape_push_value(vm,
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_STRING},
+                        .u.sval = result,
+                    });
+                break;
+            }
+            if (lhs.type.tag == CLAPE_TYPE_STRING && rhs.type.tag == CLAPE_TYPE_CHAR) {
+                // We can "append" a value to a string using arithmetic
+                const size_t llen = strlen(lhs.u.sval);
+                char *const result = malloc(llen + 2);
+                memcpy(result, lhs.u.sval, llen);
+                result[llen] = rhs.u.cval;
+                result[llen + 1] = '\0';
+                clape_push_value(vm,
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_STRING},
+                        .u.sval = result,
+                    });
+                break;
+            }
+            if (lhs.type.tag == CLAPE_TYPE_CHAR && rhs.type.tag == CLAPE_TYPE_STRING) {
+                // We can "prepend" a value to a string using arithmetic
+                const size_t rlen = strlen(rhs.u.sval);
+                char *const result = malloc(rlen + 2);
+                memcpy(result, rhs.u.sval + 1, rlen);
+                result[0] = lhs.u.cval;
+                result[rlen + 1] = '\0';
                 clape_push_value(vm,
                     (clape_value_t){
                         .type = {.tag = CLAPE_TYPE_STRING},
