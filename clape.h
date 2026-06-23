@@ -699,6 +699,54 @@ typedef struct clape_fn_t {
     struct clape_generic_binding *genv;
 } clape_fn_t;
 
+/// @struct `clape_frame_t`
+/// @brief A single frame in the clape evaluation stepp, as Clape is evaluated using trampolining,
+/// not recursively
+typedef struct clape_frame_t {
+    /// @var `expr`
+    /// @brief The expression being evaluated inside this frame
+    clape_expr_t *expr;
+
+    /// @var `env`
+    /// @brief The environment of evaluation, containing bindings etc
+    clape_env_t *env;
+
+    /// @var `genv`
+    /// @brief The generic environment of evaluation, only actually needed when evaluating calls
+    clape_generic_binding_t *genv;
+
+    /// @var `eval_stage`
+    /// @brief The "evaluation stage" inside the expression. This is needed for subsequent
+    ///        evaluations of different stages of the same expression. For example "stage 0" for
+    ///        evaluating an if expression is the evaluation of the condition expression, and later
+    ///        in "stage 1" we branch based on the value of that expression
+    size_t eval_stage;
+
+    // @var `prev`
+    // @brief A pointer to the previous frame, needed to "go back" for value proposition
+    struct clape_frame_t *prev;
+} clape_frame_t;
+
+/// @struct `clape_vm_t`
+/// @brief Clape is evaluated using a lightweight mini VM approach. Basically we evaluate
+///        expressions and remember which "stage" of every expression we are in when "going back" to
+///        it later to continue on with the next stage. This enables Clape to be entirely evaluated
+///        in one single loop. While this is a bit slower compared to recursive evaluation, it
+///        allows for arbitrarily deep recursion of Clape programs, which is much more important
+///        than being a few percent faster
+typedef struct clape_vm_t {
+    /// @var `top`
+    /// @brief The frame which currently is being evaluated by the eval loop
+    clape_frame_t *top;
+
+    /// @var `values`
+    /// @brief A list of accumulated values of the evaluator. Every element of the array is of type
+    ///        `clape_value_t`. Grows and shrinks dynamically based on how many values need to be
+    ///        pushed to the stack. For example to evaluate a binary operation we need to store both
+    ///        the lhs and the rhs of the binop in the value stack.
+    clape_arr_t *values;
+} clape_vm_t;
+
 /// @enum `token_type_e`
 /// @brief The enum of all possible Clape token types
 typedef enum : uint8_t {
@@ -3642,7 +3690,9 @@ void clape_free_program(clape_program_t *const program) {
 /// @brief Interprets (executes) a parsed Clape program
 ///
 /// @param `program` The program to interpret
-void clape_interpret(clape_program_t *const program);
+/// @return `clape_value_t` The return value of the evaluated program, as the last expression in the
+/// program is considered to be the return value (eventually)
+clape_value_t clape_interpret(clape_program_t *const program);
 
 #ifdef CLAPE_IMPLEMENTATION
 
@@ -3953,458 +4003,9 @@ static clape_generic_binding_t *clape_infer_generic_types( //
     }
 }
 
-static clape_value_t clape_eval(clape_expr_t *expr, clape_env_t *env) {
-    // Two helper macros to greatly reduce code duplication
-#define CMP_NUMERIC(op)                                                                            \
-    do {                                                                                           \
-        bool _r = false;                                                                           \
-        switch (lhs.type.tag) {                                                                    \
-            case CLAPE_TYPE_INT:                                                                   \
-                _r = lhs.u.ival op rhs.u.ival;                                                     \
-                break;                                                                             \
-            case CLAPE_TYPE_FLOAT:                                                                 \
-                _r = lhs.u.fval op rhs.u.fval;                                                     \
-                break;                                                                             \
-            case CLAPE_TYPE_CHAR:                                                                  \
-                _r = lhs.u.cval op rhs.u.cval;                                                     \
-                break;                                                                             \
-            default:                                                                               \
-                fprintf(stderr, "Comparison requires Int, Float, or Char\n");                      \
-                exit(1);                                                                           \
-        }                                                                                          \
-        return (clape_value_t){.type = {.tag = CLAPE_TYPE_BOOL}, .u.bval = _r};                    \
-    } while (0)
-
-#define CMP_EQUALITY(op)                                                                           \
-    do {                                                                                           \
-        bool _r = false;                                                                           \
-        switch (lhs.type.tag) {                                                                    \
-            case CLAPE_TYPE_INT:                                                                   \
-                _r = lhs.u.ival op rhs.u.ival;                                                     \
-                break;                                                                             \
-            case CLAPE_TYPE_FLOAT:                                                                 \
-                _r = lhs.u.fval op rhs.u.fval;                                                     \
-                break;                                                                             \
-            case CLAPE_TYPE_BOOL:                                                                  \
-                _r = lhs.u.bval op rhs.u.bval;                                                     \
-                break;                                                                             \
-            case CLAPE_TYPE_STRING:                                                                \
-                _r = strcmp(lhs.u.sval, rhs.u.sval) op 0;                                          \
-                break;                                                                             \
-            case CLAPE_TYPE_CHAR:                                                                  \
-                _r = lhs.u.cval op rhs.u.cval;                                                     \
-                break;                                                                             \
-            default:                                                                               \
-                fprintf(stderr, "Equality not supported for this type\n");                         \
-                exit(1);                                                                           \
-        }                                                                                          \
-        return (clape_value_t){.type = {.tag = CLAPE_TYPE_BOOL}, .u.bval = _r};                    \
-    } while (0)
-
-    switch (expr->tag) {
-        case CLAPE_EXPR_LIT: {
-            clape_value_t v = expr->u.lit;
-            if (v.type.tag == CLAPE_TYPE_STRING) {
-                v.u.sval = strdup(v.u.sval);
-            }
-            return v;
-        }
-        case CLAPE_EXPR_IDENT: {
-            for (clape_env_t *e = env; e; e = e->next) {
-                if (strcmp(e->name, expr->u.ident) == 0) {
-                    return e->value;
-                }
-            }
-            fprintf(stderr, "Undefined variable: %s in env={", expr->u.ident);
-            for (clape_env_t *e = env; e; e = e->next) {
-                fprintf(stderr, "%s%s%s", e == env ? "" : ", ", e->name,
-                    e->value.type.tag == CLAPE_TYPE_FUNC ? ":func" : "");
-            }
-            fprintf(stderr, "}\n");
-            exit(1);
-        }
-        case CLAPE_EXPR_UNARY: {
-            clape_value_t operand = clape_eval(expr->u.unary.operand, env);
-            if (operand.type.tag != CLAPE_TYPE_BOOL) {
-                fprintf(stderr, "not requires a Bool operand\n");
-                exit(1);
-            }
-            return (clape_value_t){
-                .type = {.tag = CLAPE_TYPE_BOOL},
-                .u.bval = !operand.u.bval,
-            };
-        }
-        case CLAPE_EXPR_BINOP: {
-            clape_value_t lhs = clape_eval(expr->u.binop.lhs, env);
-            clape_value_t rhs = clape_eval(expr->u.binop.rhs, env);
-
-            clape_binop_e op = expr->u.binop.op;
-            if (lhs.type.tag != rhs.type.tag && op != CLAPE_BINOP_CONS) {
-                fprintf(stderr, "Type mismatch in binary operation\n");
-                exit(1);
-            }
-
-            switch (op) {
-                case CLAPE_BINOP_AND:
-                case CLAPE_BINOP_OR:
-                    if (lhs.type.tag != CLAPE_TYPE_BOOL || rhs.type.tag != CLAPE_TYPE_BOOL) {
-                        fprintf(stderr, "and/or require Bool operands\n");
-                        exit(1);
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_BOOL},
-                        .u.bval = (op == CLAPE_BINOP_AND) ? (lhs.u.bval && rhs.u.bval)
-                                                          : (lhs.u.bval || rhs.u.bval),
-                    };
-                case CLAPE_BINOP_ADD:
-                    if (lhs.type.tag == CLAPE_TYPE_STRING && rhs.type.tag == CLAPE_TYPE_STRING) {
-                        size_t llen = strlen(lhs.u.sval);
-                        size_t rlen = strlen(rhs.u.sval);
-                        char *result = malloc(llen + rlen + 1);
-                        memcpy(result, lhs.u.sval, llen);
-                        memcpy(result + llen, rhs.u.sval, rlen + 1);
-                        return (clape_value_t){
-                            .type = {.tag = CLAPE_TYPE_STRING},
-                            .u.sval = result,
-                        };
-                    }
-                    [[fallthrough]];
-                case CLAPE_BINOP_SUB:
-                case CLAPE_BINOP_MUL:
-                case CLAPE_BINOP_DIV:
-                    if (lhs.type.tag != rhs.type.tag) {
-                        fprintf(stderr, "Type mismatch in arithmetic: cannot mix types\n");
-                        exit(1);
-                    }
-                    switch (lhs.type.tag) {
-                        default:
-                            fprintf(stderr, "Arithmetic requires Int or Float\n");
-                            exit(1);
-                        case CLAPE_TYPE_INT: {
-                            int64_t r;
-                            switch (op) {
-                                case CLAPE_BINOP_ADD:
-                                    r = lhs.u.ival + rhs.u.ival;
-                                    break;
-                                case CLAPE_BINOP_SUB:
-                                    r = lhs.u.ival - rhs.u.ival;
-                                    break;
-                                case CLAPE_BINOP_MUL:
-                                    r = lhs.u.ival * rhs.u.ival;
-                                    break;
-                                case CLAPE_BINOP_DIV:
-                                    r = lhs.u.ival / rhs.u.ival;
-                                    break;
-                                default:
-                                    exit(1);
-                            }
-                            return (clape_value_t){
-                                .type = {.tag = CLAPE_TYPE_INT},
-                                .u.ival = r,
-                            };
-                        }
-                        case CLAPE_TYPE_FLOAT: {
-                            double r;
-                            switch (op) {
-                                case CLAPE_BINOP_ADD:
-                                    r = lhs.u.fval + rhs.u.fval;
-                                    break;
-                                case CLAPE_BINOP_SUB:
-                                    r = lhs.u.fval - rhs.u.fval;
-                                    break;
-                                case CLAPE_BINOP_MUL:
-                                    r = lhs.u.fval * rhs.u.fval;
-                                    break;
-                                case CLAPE_BINOP_DIV:
-                                    r = lhs.u.fval / rhs.u.fval;
-                                    break;
-                                default:
-                                    exit(1);
-                            }
-                            return (clape_value_t){
-                                .type = {.tag = CLAPE_TYPE_FLOAT},
-                                .u.fval = r,
-                            };
-                        }
-                    }
-                case CLAPE_BINOP_EQ:
-                    CMP_EQUALITY(==);
-                case CLAPE_BINOP_NE:
-                    CMP_EQUALITY(!=);
-                case CLAPE_BINOP_LT:
-                    CMP_NUMERIC(<);
-                case CLAPE_BINOP_LE:
-                    CMP_NUMERIC(<=);
-                case CLAPE_BINOP_GT:
-                    CMP_NUMERIC(>);
-                case CLAPE_BINOP_GE:
-                    CMP_NUMERIC(>=);
-                case CLAPE_BINOP_CONS: {
-                    if (rhs.type.tag == CLAPE_TYPE_LIST) {
-                        clape_cons_t *node = malloc(sizeof(clape_cons_t));
-                        *node = (clape_cons_t){.head = lhs, .tail = rhs.u.list, .arc = 1};
-                        for (clape_cons_t *n = rhs.u.list; n; n = n->tail) {
-                            n->arc++;
-                        }
-                        return (clape_value_t){
-                            .type = {.tag = CLAPE_TYPE_LIST},
-                            .u.list = node,
-                        };
-                    }
-                    if (rhs.type.tag == CLAPE_TYPE_STRING && lhs.type.tag == CLAPE_TYPE_CHAR) {
-                        size_t slen = strlen(rhs.u.sval);
-                        char *new_str = malloc(slen + 2);
-                        new_str[0] = lhs.u.cval;
-                        memcpy(new_str + 1, rhs.u.sval, slen + 1);
-                        return (clape_value_t){
-                            .type = {.tag = CLAPE_TYPE_STRING},
-                            .u.sval = new_str,
-                        };
-                    }
-                    fprintf(stderr, "Cons requires a list or string on the right\n");
-                    exit(1);
-                }
-                case CLAPE_BINOP_PROD: {
-                    clape_arr_t *result = clape_arr_create(sizeof(clape_product_value_t), 0);
-                    // A's fields go first (left side)
-                    if (lhs.type.tag == CLAPE_TYPE_PRODUCT) {
-                        for (size_t i = 0; i < lhs.u.product->len; i++) {
-                            clape_product_value_t *f = ACCESS_ARR_AT(   //
-                                clape_product_value_t, lhs.u.product, i //
-                            );
-                            clape_product_value_t pf = {.name = strdup(f->name), .value = f->value};
-                            clape_arr_append(sizeof(clape_product_value_t), &result, &pf);
-                        }
-                    }
-                    // Then B's fields: right side overrides left
-                    if (rhs.type.tag == CLAPE_TYPE_PRODUCT) {
-                        for (size_t i = 0; i < rhs.u.product->len; i++) {
-                            clape_product_value_t *f = ACCESS_ARR_AT(   //
-                                clape_product_value_t, rhs.u.product, i //
-                            );
-                            bool dup = false;
-                            for (size_t j = 0; j < result->len; j++) {
-                                clape_product_value_t *pf = ACCESS_ARR_AT( //
-                                    clape_product_value_t, result, j       //
-                                );
-                                if (strcmp(pf->name, f->name) == 0) {
-                                    pf->value = f->value;
-                                    dup = true;
-                                    break;
-                                }
-                            }
-                            if (!dup) {
-                                clape_product_value_t pf = {
-                                    .name = strdup(f->name),
-                                    .value = f->value,
-                                };
-                                clape_arr_append(sizeof(clape_product_value_t), &result, &pf);
-                            }
-                        }
-                    }
-                    return (clape_value_t){
-                        .type = {.tag = CLAPE_TYPE_PRODUCT},
-                        .u.product = result,
-                    };
-                }
-            }
-#undef CMP_NUMERIC
-#undef CMP_EQUALITY
-            __builtin_unreachable();
-        }
-        case CLAPE_EXPR_IF: {
-            clape_value_t cond = clape_eval(expr->u.if_.condition, env);
-            if (cond.type.tag != CLAPE_TYPE_BOOL) {
-                fprintf(stderr, "if condition must be Bool\n");
-                exit(1);
-            }
-            if (cond.u.bval) {
-                return clape_eval(expr->u.if_.then_branch, env);
-            }
-            return clape_eval(expr->u.if_.else_branch, env);
-        }
-        case CLAPE_EXPR_LAMBDA: {
-            clape_fn_t *fn = malloc(sizeof(clape_fn_t));
-            *fn = (clape_fn_t){
-                .is_builtin = false,
-                .params = expr->u.lambda.params,
-                .return_type = expr->u.lambda.return_type,
-                .body = expr->u.lambda.body,
-                .builtin_fn = NULL,
-                .next_param_index = 0,
-                .closure = env,
-                .generic_params = expr->u.lambda.generic_params,
-                .genv = NULL,
-            };
-            return (clape_value_t){
-                .type = {.tag = CLAPE_TYPE_FUNC},
-                .u.fn = fn,
-            };
-        }
-        case CLAPE_EXPR_BLOCK: {
-            clape_env_t *block_env = env;
-            for (size_t i = 0; i < expr->u.block.stmts->len; i++) {
-                clape_stmt_t *s = ACCESS_ARR_AT(clape_stmt_t, expr->u.block.stmts, i);
-                clape_value_t val = clape_eval(&s->u.let.expr, block_env);
-
-                if (strcmp(s->u.let.name, "_") == 0) {
-                    continue;
-                }
-                // Create new binding
-                clape_env_t *const binding = malloc(sizeof(clape_env_t));
-                *binding = (clape_env_t){
-                    .name = strdup(s->u.let.name),
-                    .value = val,
-                    .next = block_env,
-                };
-                if (val.type.tag == CLAPE_TYPE_FUNC && !val.u.fn->is_builtin) {
-                    // Make the function see itself in its closure
-                    clape_env_t *const self_binding = malloc(sizeof(clape_env_t));
-                    *self_binding = *binding;
-                    val.u.fn->closure = self_binding;
-                }
-                block_env = binding;
-            }
-            if (expr->u.block.return_expr) {
-                return clape_eval(expr->u.block.return_expr, block_env);
-            }
-            return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
-        }
-        case CLAPE_EXPR_LIST: {
-            clape_cons_t *list = NULL;
-            for (size_t i = expr->u.lst.elements->len; i > 0; i--) {
-                clape_expr_t *e = ACCESS_ARR_AT(clape_expr_t, expr->u.lst.elements, i - 1);
-                clape_value_t elem = clape_eval(e, env);
-                clape_cons_t *node = malloc(sizeof(clape_cons_t));
-                *node = (clape_cons_t){.head = elem, .tail = list, .arc = 1};
-                list = node;
-            }
-            return (clape_value_t){
-                .type = {.tag = CLAPE_TYPE_LIST},
-                .u.list = list,
-            };
-        }
-        case CLAPE_EXPR_MATCH: {
-            clape_value_t scrutinee = clape_eval(expr->u.match_.scrutinee, env);
-            for (size_t i = 0; i < expr->u.match_.arms->len; i++) {
-                clape_match_arm_t *arm = ACCESS_ARR_AT(clape_match_arm_t, expr->u.match_.arms, i);
-                clape_env_t *arm_env = clape_match_value(scrutinee, &arm->pattern, env);
-                if (arm_env) {
-                    return clape_eval(&arm->body, arm_env);
-                }
-            }
-            fprintf(stderr, "Non-exhaustive match\n");
-            exit(1);
-        }
-        case CLAPE_EXPR_PRODUCT_TYPE:
-        case CLAPE_EXPR_SUM_TYPE:
-            return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
-        case CLAPE_EXPR_SUM: {
-            clape_value_t *payload = NULL;
-            if (expr->u.sum.expr) {
-                payload = malloc(sizeof(clape_value_t));
-                *payload = clape_eval(expr->u.sum.expr, env);
-            }
-            return (clape_value_t){
-                .type = {.tag = CLAPE_TYPE_SUM},
-                .u.sum = {.constructor = strdup(expr->u.sum.constructor), .value = payload},
-            };
-        }
-        case CLAPE_EXPR_FIELD: {
-            const clape_value_t val = clape_eval(expr->u.field.value, env);
-            clape_arr_t *fields = clape_arr_create(sizeof(clape_product_value_t), 0);
-            clape_product_value_t pv = {
-                .name = strdup(expr->u.field.name),
-                .value = val,
-            };
-            clape_arr_append(sizeof(clape_product_value_t), &fields, &pv);
-            return (clape_value_t){
-                .type = {.tag = CLAPE_TYPE_PRODUCT},
-                .u.product = fields,
-            };
-        }
-        case CLAPE_EXPR_FIELD_ACCESS: {
-            const clape_value_t obj = clape_eval(expr->u.field_access.expr, env);
-            if (obj.type.tag != CLAPE_TYPE_PRODUCT) {
-                fprintf(stderr, "Field access requires a product value\n");
-                exit(1);
-            }
-            for (size_t i = 0; i < obj.u.product->len; i++) {
-                clape_product_value_t *f = ACCESS_ARR_AT(clape_product_value_t, obj.u.product, i);
-                if (strcmp(f->name, expr->u.field_access.name) == 0) {
-                    return f->value;
-                }
-            }
-            fprintf(stderr, "No such field '%s' in product\n", expr->u.field_access.name);
-            exit(1);
-        }
-        case CLAPE_EXPR_TYPE:
-            return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
-        case CLAPE_EXPR_CALL: {
-            const clape_value_t callee = clape_eval(expr->u.call.callee, env);
-            const clape_value_t arg = clape_eval(expr->u.call.arg, env);
-            if (callee.type.tag != CLAPE_TYPE_FUNC) {
-                fprintf(stderr, "Attempted to call a non-function value\n");
-                exit(1);
-            }
-            clape_fn_t *const fn = callee.u.fn;
-
-            if (fn->is_builtin) {
-                return fn->builtin_fn(arg);
-            }
-
-            const size_t idx = fn->next_param_index;
-            clape_param_t *const param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
-
-            clape_generic_binding_t *genv = fn->genv;
-            genv = clape_infer_generic_types(&param->type, &arg, genv);
-
-            if (!clape_type_is_compatible(&arg, &param->type, &genv)) {
-                fprintf(stderr, "Type error: parameter '%s' expected %s, got %s\n", param->name,
-                    clape_type_tag_name(param->type.tag), clape_type_tag_name(arg.type.tag));
-                clape_genv_free(genv);
-                exit(1);
-            }
-
-            clape_env_t *const new_closure = malloc(sizeof(clape_env_t));
-            *new_closure = (clape_env_t){
-                .name = strdup(param->name),
-                .value = arg,
-                .next = fn->closure,
-            };
-
-            if (idx + 1 == fn->params->len) {
-                const clape_value_t result = clape_eval(fn->body, new_closure);
-                if (!clape_type_is_compatible(&result, &fn->return_type, &genv)) {
-                    fprintf(stderr, "Type error: function returned %s, expected %s\n",
-                        clape_type_tag_name(result.type.tag),
-                        clape_type_tag_name(fn->return_type.tag));
-                    clape_genv_free(genv);
-                    exit(1);
-                }
-                clape_genv_free(genv);
-                return result;
-            }
-            clape_fn_t *const partial = malloc(sizeof(clape_fn_t));
-            *partial = (clape_fn_t){
-                .is_builtin = false,
-                .params = fn->params,
-                .return_type = fn->return_type,
-                .body = fn->body,
-                .builtin_fn = NULL,
-                .next_param_index = idx + 1,
-                .closure = new_closure,
-                .generic_params = NULL,
-                .genv = genv,
-            };
-            return (clape_value_t){
-                .type = {.tag = CLAPE_TYPE_FUNC},
-                .u.fn = partial,
-            };
-        }
-    }
-    return (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}};
-}
+/*
+ * ====== BUILTINS BEGIN ======
+ */
 
 static void clape_print_value_inner(clape_value_t v, int depth) {
     switch (v.type.tag) {
@@ -4433,7 +4034,9 @@ static void clape_print_value_inner(clape_value_t v, int depth) {
             break;
         case CLAPE_TYPE_UNIT:
             if (depth > 0) {
-                // Print nothing, used for printing empty lines
+                // Only print the unit if it's not at the top-level. So, when calling `print {}`
+                // just a new line is printed but when a `Unit` is part of a different type, like a
+                // function signature, it is printed as `Unit` instead
                 printf("Unit");
             }
             break;
@@ -4537,6 +4140,135 @@ static clape_value_t clape_builtin_load_file(clape_value_t arg) {
     return (clape_value_t){.type = return_type, .u.list = list_values};
 }
 
+/*
+ * ====== BUILTINS END ======
+ */
+
+/*
+ * ====== STMT EVAL BEGIN ======
+ */
+
+static bool clape_eval_stmt_use(clape_stmt_t *const stmt, clape_env_t **env) {
+    // Use statement
+    if (strcmp(stmt->u.use.module, "Print") == 0) {
+        clape_fn_t *const print_fn = malloc(sizeof(clape_fn_t));
+        *print_fn = (clape_fn_t){
+            .is_builtin = true,
+            .params = NULL,
+            .return_type = {.tag = CLAPE_TYPE_UNIT},
+            .body = NULL,
+            .builtin_fn = clape_builtin_print,
+            .next_param_index = 0,
+            .closure = NULL,
+        };
+        clape_env_t *const binding = malloc(sizeof(clape_env_t));
+        *binding = (clape_env_t){
+            .name = strdup("print"),
+            .value =
+                (clape_value_t){
+                    .type = {.tag = CLAPE_TYPE_FUNC},
+                    .u.fn = print_fn,
+                },
+            .next = *env,
+        };
+        *env = binding;
+        return true;
+    } else if (strcmp(stmt->u.use.module, "File") == 0) {
+        clape_fn_t *const load_file_fn = malloc(sizeof(clape_fn_t));
+        clape_type_t *const string_type = (clape_type_t *)malloc(sizeof(clape_type_t));
+        *string_type = (clape_type_t){.tag = CLAPE_TYPE_STRING};
+        const clape_type_t return_type = (clape_type_t){
+            .tag = CLAPE_TYPE_LIST,
+            .u.element = string_type,
+        };
+        *load_file_fn = (clape_fn_t){
+            .is_builtin = true,
+            .params = NULL,
+            .return_type = return_type,
+            .body = NULL,
+            .builtin_fn = clape_builtin_load_file,
+            .next_param_index = 0,
+            .closure = NULL,
+        };
+        clape_env_t *const binding = malloc(sizeof(clape_env_t));
+        *binding = (clape_env_t){
+            .name = strdup("load_file"),
+            .value =
+                (clape_value_t){
+                    .type = {.tag = CLAPE_TYPE_FUNC},
+                    .u.fn = load_file_fn,
+                },
+            .next = *env,
+        };
+        *env = binding;
+        return true;
+    }
+    fprintf(stderr, "Unknown module: %s\n", stmt->u.use.module);
+    return false;
+}
+
+/*
+ * ====== STMT EVAL END ======
+ */
+
+static clape_value_t clape_clone_value(clape_value_t val);
+
+static clape_cons_t *clape_clone_cons(clape_cons_t *list) {
+    if (list == NULL)
+        return NULL;
+    clape_cons_t *clone = malloc(sizeof(clape_cons_t));
+    clone->head = clape_clone_value(list->head);
+    clone->tail = clape_clone_cons(list->tail);
+    clone->arc = 1;
+    return clone;
+}
+
+static clape_value_t clape_clone_value(clape_value_t val) {
+    switch (val.type.tag) {
+        case CLAPE_TYPE_STRING:
+            val.u.sval = strdup(val.u.sval);
+            return val;
+        case CLAPE_TYPE_LIST:
+            val.u.list = clape_clone_cons(val.u.list);
+            return val;
+        case CLAPE_TYPE_PRODUCT: {
+            clape_arr_t *clone =
+                clape_arr_create(sizeof(clape_product_value_t), val.u.product->len);
+            for (size_t i = 0; i < val.u.product->len; i++) {
+                clape_product_value_t *f = ACCESS_ARR_AT(   //
+                    clape_product_value_t, val.u.product, i //
+                );
+                clape_product_value_t cf = {
+                    .name = strdup(f->name),
+                    .value = clape_clone_value(f->value),
+                };
+                *ACCESS_ARR_AT(clape_product_value_t, clone, i) = cf;
+            }
+            val.u.product = clone;
+            return val;
+        }
+        case CLAPE_TYPE_SUM: {
+            clape_value_t *payload = NULL;
+            if (val.u.sum.value) {
+                payload = malloc(sizeof(clape_value_t));
+                *payload = clape_clone_value(*val.u.sum.value);
+            }
+            return (clape_value_t){
+                .type = {.tag = CLAPE_TYPE_SUM},
+                .u.sum =
+                    {
+                        .constructor = strdup(val.u.sum.constructor),
+                        .value = payload,
+                    },
+            };
+        }
+        case CLAPE_TYPE_FUNC:
+            return val;
+        default:
+            return val;
+    }
+}
+
 static void clape_free_list_value(clape_cons_t *list) {
     while (list != NULL) {
         clape_cons_t *const next = list->tail;
@@ -4557,7 +4289,7 @@ static void clape_env_free(clape_env_t *env) {
         clape_env_t *const next = env->next;
         free(env->name);
         if (env->value.type.tag == CLAPE_TYPE_FUNC) {
-            free(env->value.u.fn);
+            // copied
         } else if (env->value.type.tag == CLAPE_TYPE_STRING) {
             free(env->value.u.sval);
         } else if (env->value.type.tag == CLAPE_TYPE_LIST) {
@@ -4591,109 +4323,802 @@ static void clape_env_free(clape_env_t *env) {
     }
 }
 
-void clape_interpret(clape_program_t *const program) {
-    clape_env_t *env = NULL;
+static clape_env_t *clape_env_clone(clape_env_t *const env) {
+    if (env == NULL)
+        return NULL;
+    clape_env_t *clone = malloc(sizeof(clape_env_t));
+    *clone = (clape_env_t){
+        .name = strdup(env->name),
+        .value = clape_clone_value(env->value),
+        .next = clape_env_clone(env->next),
+    };
+    return clone;
+}
 
-    for (size_t i = 0; i < program->statements->len; i++) {
-        clape_stmt_t *const stmt = ACCESS_ARR_AT(clape_stmt_t, program->statements, i);
+static void clape_push_frame(clape_vm_t *const vm, clape_expr_t *const expr) {
+    clape_frame_t *old_top = vm->top;
+    vm->top = (clape_frame_t *)malloc(sizeof(clape_frame_t));
+    *vm->top = (clape_frame_t){
+        .expr = expr,
+        .env = old_top
+            ? (expr->tag == CLAPE_EXPR_BLOCK ? clape_env_clone(old_top->env) : old_top->env)
+            : NULL,
+        .genv = old_top ? old_top->genv : NULL,
+        .eval_stage = 0,
+        .prev = old_top,
+    };
+}
 
-        switch (stmt->tag) {
-            case CLAPE_STMT_LET: {
-                const clape_value_t val = clape_eval(&stmt->u.let.expr, env);
-                const bool is_type = val.type.tag == CLAPE_TYPE_UNIT;
-                const bool is_product_type = is_type //
-                    && stmt->u.let.expr.tag == CLAPE_EXPR_PRODUCT_TYPE;
-                const bool is_sum_type = is_type //
-                    && stmt->u.let.expr.tag == CLAPE_EXPR_SUM_TYPE;
-                if (is_product_type || is_sum_type) {
-                    // Type binding: no runtime value
-                    break;
-                }
-                if (strcmp(stmt->u.let.name, "_") == 0) {
-                    break;
-                }
-                clape_env_t *const binding = malloc(sizeof(clape_env_t));
-                *binding = (clape_env_t){
-                    .name = strdup(stmt->u.let.name),
-                    .value = val,
-                    .next = env,
-                };
-                env = binding;
-                // Update closure to include this binding, enabling recursion.
-                // Prepend self-binding to preserve existing captured variables.
-                if (val.type.tag == CLAPE_TYPE_FUNC && !val.u.fn->is_builtin) {
-                    clape_env_t *self = malloc(sizeof(clape_env_t));
-                    *self = (clape_env_t){
-                        .name = strdup(stmt->u.let.name),
-                        .value = val,
-                        .next = val.u.fn->closure,
-                    };
-                    val.u.fn->closure = self;
-                }
+static void clape_pop_frame(clape_vm_t *const vm) {
+    clape_frame_t *to_pop = vm->top;
+    vm->top = to_pop->prev;
+    free(to_pop);
+}
+
+[[nodiscard]] static clape_value_t clape_pop_value(clape_vm_t *const vm) {
+    // It is okay to decrement the value since the array is only a temporal storage anyway, so it
+    // never really "owns" it. The "owner" of any complex data in the value is transferred here
+    vm->values->len--;
+    return *ACCESS_ARR_AT(clape_value_t, vm->values, vm->values->len);
+}
+
+static void clape_push_value(clape_vm_t *const vm, clape_value_t value) {
+    clape_arr_append(sizeof(clape_value_t), &vm->values, &value);
+}
+
+static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
+    return ACCESS_ARR_AT(clape_value_t, vm->values, vm->values->len - 1);
+}
+
+[[nodiscard]] static bool clape_eval_expr_lit(clape_vm_t *const vm) {
+    clape_value_t result = vm->top->expr->u.lit;
+    if (result.type.tag == CLAPE_TYPE_STRING) {
+        result.u.sval = strdup(result.u.sval);
+    }
+    clape_push_value(vm, result);
+    clape_pop_frame(vm);
+    return true;
+}
+
+[[nodiscard]] static bool clape_eval_expr_ident(clape_vm_t *const vm) {
+    for (clape_env_t *e = vm->top->env; e; e = e->next) {
+        if (strcmp(e->name, vm->top->expr->u.ident) == 0) {
+            clape_push_value(vm, clape_clone_value(e->value));
+            clape_pop_frame(vm);
+            return true;
+        }
+    }
+    fprintf(stderr, "Undefined variable: %s in env={", vm->top->expr->u.ident);
+    for (clape_env_t *e = vm->top->env; e; e = e->next) {
+        fprintf(stderr, "%s%s%s", e == vm->top->env ? "" : ", ", e->name,
+            e->value.type.tag == CLAPE_TYPE_FUNC ? ":func" : "");
+    }
+    fprintf(stderr, "}\n");
+    return false;
+}
+
+[[nodiscard]] static bool clape_eval_expr_unary(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    if (*stage == 0) {
+        // Evaluate the operand expression first
+        (*stage)++;
+        clape_push_frame(vm, vm->top->expr->u.unary.operand);
+        return true;
+    }
+    // The operand expression is stored in the value stack of the vm, we apply the unary operation
+    // on the value and pop this frame from the eval stack.
+    clape_value_t *const result = clape_peek_value(vm);
+    if (result->type.tag != CLAPE_TYPE_BOOL) {
+        fprintf(stderr, "not requires a Bool operand\n");
+        return false;
+    }
+    *result = (clape_value_t){
+        .type = {.tag = CLAPE_TYPE_BOOL},
+        .u.bval = !result->u.bval,
+    };
+    clape_pop_frame(vm);
+    return true;
+}
+
+[[nodiscard]] static bool clape_eval_expr_binop(clape_vm_t *const vm) {
+    // Two helper macros to greatly reduce code duplication
+#define CMP_NUMERIC(op)                                                                            \
+    do {                                                                                           \
+        bool _r = false;                                                                           \
+        switch (lhs.type.tag) {                                                                    \
+            case CLAPE_TYPE_INT:                                                                   \
+                _r = lhs.u.ival op rhs.u.ival;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_FLOAT:                                                                 \
+                _r = lhs.u.fval op rhs.u.fval;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_CHAR:                                                                  \
+                _r = lhs.u.cval op rhs.u.cval;                                                     \
+                break;                                                                             \
+            default:                                                                               \
+                fprintf(stderr, "Comparison requires Int, Float, or Char\n");                      \
+                return false;                                                                      \
+        }                                                                                          \
+        clape_push_value(vm, (clape_value_t){.type = {.tag = CLAPE_TYPE_BOOL}, .u.bval = _r});     \
+        break;                                                                                     \
+    } while (0)
+
+#define CMP_EQUALITY(op)                                                                           \
+    do {                                                                                           \
+        bool _r = false;                                                                           \
+        switch (lhs.type.tag) {                                                                    \
+            case CLAPE_TYPE_INT:                                                                   \
+                _r = lhs.u.ival op rhs.u.ival;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_FLOAT:                                                                 \
+                _r = lhs.u.fval op rhs.u.fval;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_BOOL:                                                                  \
+                _r = lhs.u.bval op rhs.u.bval;                                                     \
+                break;                                                                             \
+            case CLAPE_TYPE_STRING:                                                                \
+                _r = strcmp(lhs.u.sval, rhs.u.sval) op 0;                                          \
+                break;                                                                             \
+            case CLAPE_TYPE_CHAR:                                                                  \
+                _r = lhs.u.cval op rhs.u.cval;                                                     \
+                break;                                                                             \
+            default:                                                                               \
+                fprintf(stderr, "Equality not supported for this type\n");                         \
+                return false;                                                                      \
+        }                                                                                          \
+        clape_push_value(vm, (clape_value_t){.type = {.tag = CLAPE_TYPE_BOOL}, .u.bval = _r});     \
+        break;                                                                                     \
+    } while (0)
+
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    if (*stage == 0) {
+        // Evaluate the lhs expression first
+        (*stage)++;
+        clape_push_frame(vm, expr->u.binop.lhs);
+        return true;
+    }
+    if (*stage == 1) {
+        // Then evaluate the rhs expression
+        (*stage)++;
+        clape_push_frame(vm, expr->u.binop.rhs);
+        return true;
+    }
+    // Load both the lhs and rhs expressions
+    const clape_value_t rhs = clape_pop_value(vm);
+    const clape_value_t lhs = clape_pop_value(vm);
+    const clape_binop_e op = expr->u.binop.op;
+    if (lhs.type.tag != rhs.type.tag && op != CLAPE_BINOP_CONS) {
+        fprintf(stderr, "Type mismatch in binary operation\n");
+        return false;
+    }
+
+    switch (op) {
+        case CLAPE_BINOP_AND:
+        case CLAPE_BINOP_OR:
+            if (lhs.type.tag != CLAPE_TYPE_BOOL || rhs.type.tag != CLAPE_TYPE_BOOL) {
+                fprintf(stderr, "and/or require Bool operands\n");
+                return false;
+            }
+            clape_push_value(vm,
+                (clape_value_t){
+                    .type = {.tag = CLAPE_TYPE_BOOL},
+                    .u.bval = (op == CLAPE_BINOP_AND) ? (lhs.u.bval && rhs.u.bval)
+                                                      : (lhs.u.bval || rhs.u.bval),
+                });
+            break;
+        case CLAPE_BINOP_ADD:
+            if (lhs.type.tag == CLAPE_TYPE_STRING && rhs.type.tag == CLAPE_TYPE_STRING) {
+                size_t llen = strlen(lhs.u.sval);
+                size_t rlen = strlen(rhs.u.sval);
+                char *result = malloc(llen + rlen + 1);
+                memcpy(result, lhs.u.sval, llen);
+                memcpy(result + llen, rhs.u.sval, rlen + 1);
+                clape_push_value(vm,
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_STRING},
+                        .u.sval = result,
+                    });
                 break;
             }
-            case CLAPE_STMT_USE: {
-                // Use statement
-                if (strcmp(stmt->u.use.module, "Print") == 0) {
-                    clape_fn_t *const print_fn = malloc(sizeof(clape_fn_t));
-                    *print_fn = (clape_fn_t){
-                        .is_builtin = true,
-                        .params = NULL,
-                        .return_type = {.tag = CLAPE_TYPE_UNIT},
-                        .body = NULL,
-                        .builtin_fn = clape_builtin_print,
-                        .next_param_index = 0,
-                        .closure = NULL,
-                    };
-                    clape_env_t *const binding = malloc(sizeof(clape_env_t));
-                    *binding = (clape_env_t){
-                        .name = strdup("print"),
-                        .value =
-                            (clape_value_t){
-                                .type = {.tag = CLAPE_TYPE_FUNC},
-                                .u.fn = print_fn,
-                            },
-                        .next = env,
-                    };
-                    env = binding;
-                    break;
-                } else if (strcmp(stmt->u.use.module, "File") == 0) {
-                    clape_fn_t *const load_file_fn = malloc(sizeof(clape_fn_t));
-                    clape_type_t *const string_type = (clape_type_t *)malloc(sizeof(clape_type_t));
-                    *string_type = (clape_type_t){.tag = CLAPE_TYPE_STRING};
-                    const clape_type_t return_type = (clape_type_t){
-                        .tag = CLAPE_TYPE_LIST,
-                        .u.element = string_type,
-                    };
-                    *load_file_fn = (clape_fn_t){
-                        .is_builtin = true,
-                        .params = NULL,
-                        .return_type = return_type,
-                        .body = NULL,
-                        .builtin_fn = clape_builtin_load_file,
-                        .next_param_index = 0,
-                        .closure = NULL,
-                    };
-                    clape_env_t *const binding = malloc(sizeof(clape_env_t));
-                    *binding = (clape_env_t){
-                        .name = strdup("load_file"),
-                        .value =
-                            (clape_value_t){
-                                .type = {.tag = CLAPE_TYPE_FUNC},
-                                .u.fn = load_file_fn,
-                            },
-                        .next = env,
-                    };
-                    env = binding;
+            [[fallthrough]];
+        case CLAPE_BINOP_SUB:
+        case CLAPE_BINOP_MUL:
+        case CLAPE_BINOP_DIV:
+            if (lhs.type.tag != rhs.type.tag) {
+                fprintf(stderr, "Type mismatch in arithmetic: cannot mix types\n");
+                return false;
+            }
+            switch (lhs.type.tag) {
+                default:
+                    fprintf(stderr, "Arithmetic requires Int or Float\n");
+                    return false;
+                case CLAPE_TYPE_INT: {
+                    int64_t r;
+                    switch (op) {
+                        case CLAPE_BINOP_ADD:
+                            r = lhs.u.ival + rhs.u.ival;
+                            break;
+                        case CLAPE_BINOP_SUB:
+                            r = lhs.u.ival - rhs.u.ival;
+                            break;
+                        case CLAPE_BINOP_MUL:
+                            r = lhs.u.ival * rhs.u.ival;
+                            break;
+                        case CLAPE_BINOP_DIV:
+                            r = lhs.u.ival / rhs.u.ival;
+                            break;
+                        default:
+                            exit(1);
+                    }
+                    clape_push_value(vm,
+                        (clape_value_t){
+                            .type = {.tag = CLAPE_TYPE_INT},
+                            .u.ival = r,
+                        });
                     break;
                 }
-                fprintf(stderr, "Unknown module: %s\n", stmt->u.use.module);
-                exit(1);
+                case CLAPE_TYPE_FLOAT: {
+                    double r;
+                    switch (op) {
+                        case CLAPE_BINOP_ADD:
+                            r = lhs.u.fval + rhs.u.fval;
+                            break;
+                        case CLAPE_BINOP_SUB:
+                            r = lhs.u.fval - rhs.u.fval;
+                            break;
+                        case CLAPE_BINOP_MUL:
+                            r = lhs.u.fval * rhs.u.fval;
+                            break;
+                        case CLAPE_BINOP_DIV:
+                            r = lhs.u.fval / rhs.u.fval;
+                            break;
+                        default:
+                            exit(1);
+                    }
+                    clape_push_value(vm,
+                        (clape_value_t){
+                            .type = {.tag = CLAPE_TYPE_FLOAT},
+                            .u.fval = r,
+                        });
+                    break;
+                }
+            }
+            break;
+        case CLAPE_BINOP_EQ:
+            CMP_EQUALITY(==);
+            break;
+        case CLAPE_BINOP_NE:
+            CMP_EQUALITY(!=);
+            break;
+        case CLAPE_BINOP_LT:
+            CMP_NUMERIC(<);
+            break;
+        case CLAPE_BINOP_LE:
+            CMP_NUMERIC(<=);
+            break;
+        case CLAPE_BINOP_GT:
+            CMP_NUMERIC(>);
+            break;
+        case CLAPE_BINOP_GE:
+            CMP_NUMERIC(>=);
+            break;
+        case CLAPE_BINOP_CONS: {
+            if (rhs.type.tag == CLAPE_TYPE_LIST) {
+                clape_cons_t *node = malloc(sizeof(clape_cons_t));
+                *node = (clape_cons_t){.head = lhs, .tail = rhs.u.list, .arc = 1};
+                for (clape_cons_t *n = rhs.u.list; n; n = n->tail) {
+                    n->arc++;
+                }
+                clape_push_value(vm,
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_LIST},
+                        .u.list = node,
+                    });
+                clape_pop_frame(vm);
+                return true;
+            }
+            if (rhs.type.tag == CLAPE_TYPE_STRING && lhs.type.tag == CLAPE_TYPE_CHAR) {
+                size_t slen = strlen(rhs.u.sval);
+                char *new_str = malloc(slen + 2);
+                new_str[0] = lhs.u.cval;
+                memcpy(new_str + 1, rhs.u.sval, slen + 1);
+                clape_push_value(vm,
+                    (clape_value_t){
+                        .type = {.tag = CLAPE_TYPE_STRING},
+                        .u.sval = new_str,
+                    });
+                clape_pop_frame(vm);
+                return true;
+            }
+            fprintf(stderr, "Cons requires a list or string on the right\n");
+            clape_pop_frame(vm);
+            return false;
+        }
+        case CLAPE_BINOP_PROD: {
+            clape_arr_t *result = clape_arr_create(sizeof(clape_product_value_t), 0);
+            // A's fields go first (left side)
+            if (lhs.type.tag == CLAPE_TYPE_PRODUCT) {
+                for (size_t i = 0; i < lhs.u.product->len; i++) {
+                    clape_product_value_t *f = ACCESS_ARR_AT(   //
+                        clape_product_value_t, lhs.u.product, i //
+                    );
+                    clape_product_value_t pf = {.name = strdup(f->name), .value = f->value};
+                    clape_arr_append(sizeof(clape_product_value_t), &result, &pf);
+                }
+            }
+            // Then B's fields: right side overrides left
+            if (rhs.type.tag == CLAPE_TYPE_PRODUCT) {
+                for (size_t i = 0; i < rhs.u.product->len; i++) {
+                    clape_product_value_t *f = ACCESS_ARR_AT(   //
+                        clape_product_value_t, rhs.u.product, i //
+                    );
+                    bool dup = false;
+                    for (size_t j = 0; j < result->len; j++) {
+                        clape_product_value_t *pf = ACCESS_ARR_AT( //
+                            clape_product_value_t, result, j       //
+                        );
+                        if (strcmp(pf->name, f->name) == 0) {
+                            pf->value = f->value;
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) {
+                        clape_product_value_t pf = {
+                            .name = strdup(f->name),
+                            .value = f->value,
+                        };
+                        clape_arr_append(sizeof(clape_product_value_t), &result, &pf);
+                    }
+                }
+            }
+            clape_push_value(vm,
+                (clape_value_t){
+                    .type = {.tag = CLAPE_TYPE_PRODUCT},
+                    .u.product = result,
+                });
+        }
+    }
+    clape_pop_frame(vm);
+    return true;
+#undef CMP_NUMERIC
+#undef CMP_EQUALITY
+}
+
+[[nodiscard]] static bool clape_eval_expr_if(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    if (*stage == 0) {
+        // Evaluate the condition expression first
+        (*stage)++;
+        clape_push_frame(vm, vm->top->expr->u.if_.condition);
+        return true;
+    }
+    if (*stage == 1) {
+        // Evaluate the correct branch depending on the condition expression
+        const clape_value_t cond = clape_pop_value(vm);
+        if (cond.type.tag != CLAPE_TYPE_BOOL) {
+            fprintf(stderr, "if condition must be Bool\n");
+            return false;
+        }
+        (*stage)++;
+        if (cond.u.bval) {
+            // Evaluate the true branch
+            clape_push_frame(vm, vm->top->expr->u.if_.then_branch);
+        } else {
+            // Evaluate the false branch
+            clape_push_frame(vm, vm->top->expr->u.if_.else_branch);
+        }
+        return true;
+    }
+    // We "return" the expression of the evaluated branch by simply popping the frame and reusing
+    // the expression already stored in the vm
+    clape_pop_frame(vm);
+    return true;
+}
+
+static void clape_eval_expr_lambda(clape_vm_t *const vm) {
+    clape_expr_t *const expr = vm->top->expr;
+    clape_env_t *const env = vm->top->env;
+    clape_fn_t *const fn = malloc(sizeof(clape_fn_t));
+    *fn = (clape_fn_t){
+        .is_builtin = false,
+        .params = expr->u.lambda.params,
+        .return_type = expr->u.lambda.return_type,
+        .body = expr->u.lambda.body,
+        .builtin_fn = NULL,
+        .next_param_index = 0,
+        .closure = env,
+        .generic_params = expr->u.lambda.generic_params,
+        .genv = NULL,
+    };
+    clape_push_value(vm,
+        (clape_value_t){
+            .type = {.tag = CLAPE_TYPE_FUNC},
+            .u.fn = fn,
+        });
+    clape_pop_frame(vm);
+}
+
+static void clape_eval_expr_list(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    const size_t count = expr->u.lst.elements->len;
+
+    if (*stage < count) {
+        clape_expr_t *const elem = ACCESS_ARR_AT(clape_expr_t, expr->u.lst.elements, *stage);
+        (*stage)++;
+        clape_push_frame(vm, elem);
+        return;
+    }
+
+    clape_cons_t *list = NULL;
+    for (size_t i = 0; i < count; i++) {
+        const clape_value_t val = clape_pop_value(vm);
+        clape_cons_t *const node = malloc(sizeof(clape_cons_t));
+        *node = (clape_cons_t){.head = val, .tail = list, .arc = 1};
+        list = node;
+    }
+    clape_push_value(vm,
+        (clape_value_t){
+            .type = {.tag = CLAPE_TYPE_LIST},
+            .u.list = list,
+        });
+    clape_pop_frame(vm);
+}
+
+[[nodiscard]] static bool clape_eval_expr_match(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    if (*stage == 0) {
+        // First evaluate the scrutinee
+        (*stage)++;
+        clape_push_frame(vm, expr->u.match_.scrutinee);
+        return true;
+    }
+    if (*stage == 1) {
+        // We need to find the correct matching arm and then evaluate that arms expression
+        clape_value_t scrutinee = clape_pop_value(vm);
+        for (size_t i = 0; i < expr->u.match_.arms->len; i++) {
+            clape_match_arm_t *arm = ACCESS_ARR_AT(clape_match_arm_t, expr->u.match_.arms, i);
+            clape_env_t *const arm_env = clape_match_value(scrutinee, &arm->pattern, vm->top->env);
+            if (arm_env != NULL) {
+                (*stage)++;
+                clape_push_frame(vm, &arm->body);
+                vm->top->env = clape_env_clone(arm_env);
+                return true;
+            }
+        }
+        fprintf(stderr, "Non-exhaustive match\n");
+        return false;
+    }
+    // We evaluated the expression from the correct arm, only thing left to do is to pop the frame
+    // now
+    clape_pop_frame(vm);
+    return true;
+}
+
+static void clape_eval_expr_sum(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    if (*stage == 0) {
+        // Check if the sum expression contains a payload, if it does then evaluate it first
+        if (expr->u.sum.expr != NULL) {
+            (*stage)++;
+            clape_push_frame(vm, expr->u.sum.expr);
+            return;
+        }
+    }
+    clape_value_t *payload = NULL;
+    if (expr->u.sum.expr != NULL) {
+        payload = malloc(sizeof(clape_value_t));
+        *payload = clape_pop_value(vm);
+    }
+    clape_push_value(vm,
+        (clape_value_t){
+            .type = {.tag = CLAPE_TYPE_SUM},
+            .u.sum = {.constructor = strdup(expr->u.sum.constructor), .value = payload},
+        });
+    clape_pop_frame(vm);
+}
+
+static void clape_eval_expr_field(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    if (*stage == 0) {
+        // Evaluate the field value first
+        (*stage)++;
+        clape_push_frame(vm, expr->u.field.value);
+        return;
+    }
+
+    // Use the field value to construct the field
+    const clape_value_t val = clape_pop_value(vm);
+    clape_arr_t *const fields = clape_arr_create(sizeof(clape_product_value_t), 1);
+    clape_product_value_t *const product_value = ACCESS_ARR_AT(clape_product_value_t, fields, 0);
+    *product_value = (clape_product_value_t){
+        .name = strdup(expr->u.field.name),
+        .value = val,
+    };
+    clape_push_value(vm,
+        (clape_value_t){
+            .type = {.tag = CLAPE_TYPE_PRODUCT},
+            .u.product = fields,
+        });
+    clape_pop_frame(vm);
+}
+
+[[nodiscard]] static bool clape_eval_expr_field_access(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    if (*stage == 0) {
+        // Evaluate the base object on which the field access happens
+        (*stage)++;
+        clape_push_frame(vm, expr->u.field_access.expr);
+        return true;
+    }
+
+    const clape_value_t obj = clape_pop_value(vm);
+    if (obj.type.tag != CLAPE_TYPE_PRODUCT) {
+        fprintf(stderr, "Field access requires a product value\n");
+        return false;
+    }
+    for (size_t i = 0; i < obj.u.product->len; i++) {
+        clape_product_value_t *f = ACCESS_ARR_AT(clape_product_value_t, obj.u.product, i);
+        if (strcmp(f->name, expr->u.field_access.name) == 0) {
+            clape_push_value(vm, f->value);
+            clape_pop_frame(vm);
+            return true;
+        }
+    }
+    fprintf(stderr, "No such field '%s' in product\n", expr->u.field_access.name);
+    return false;
+}
+
+[[nodiscard]] static bool clape_eval_expr_call(clape_vm_t *const vm) {
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    if (*stage == 0) {
+        // Evaluate the callee of the call first
+        (*stage)++;
+        clape_push_frame(vm, expr->u.call.callee);
+        return true;
+    }
+    if (*stage == 1) {
+        // Evaluate the argument of the call second
+        (*stage)++;
+        clape_push_frame(vm, expr->u.call.arg);
+        return true;
+    }
+    if (*stage == 2) {
+        // Get the evaluated callee and arg in reverse order
+        const clape_value_t *arg = clape_peek_value(vm);
+        // The callee is stored in front of the arg
+        const clape_value_t *callee = arg - 1;
+        if (callee->type.tag != CLAPE_TYPE_FUNC) {
+            fprintf(stderr, "Attempted to call a non-function value\n");
+            return false;
+        }
+        clape_fn_t *const fn = callee->u.fn;
+
+        if (fn->is_builtin) {
+            [[maybe_unused]] const clape_value_t arg_garbage = clape_pop_value(vm);
+            [[maybe_unused]] const clape_value_t callee_garbage = clape_pop_value(vm);
+            clape_push_value(vm, fn->builtin_fn(*arg));
+            clape_pop_frame(vm);
+            return true;
+        }
+
+        const size_t idx = fn->next_param_index;
+        clape_param_t *const param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
+        clape_generic_binding_t *genv = clape_infer_generic_types(&param->type, arg, fn->genv);
+
+        if (!clape_type_is_compatible(arg, &param->type, &genv)) {
+            fprintf(stderr, "Type error: parameter '%s' expected %s, got %s\n", param->name,
+                clape_type_tag_name(param->type.tag), clape_type_tag_name(arg->type.tag));
+            clape_genv_free(genv);
+            return false;
+        }
+
+        clape_env_t *const new_closure = malloc(sizeof(clape_env_t));
+        *new_closure = (clape_env_t){
+            .name = strdup(param->name),
+            .value = *arg,
+            .next = fn->closure,
+        };
+
+        if (idx + 1 == fn->params->len) {
+            // Full application — store state, push body, defer to stage 3
+            (*stage)++;
+            vm->top->genv = genv;
+            vm->top->env = new_closure;
+            clape_push_frame(vm, fn->body);
+            return true;
+        }
+
+        // Partial application — done immediately
+        clape_fn_t *const partial = malloc(sizeof(clape_fn_t));
+        *partial = (clape_fn_t){
+            .is_builtin = false,
+            .params = fn->params,
+            .return_type = fn->return_type,
+            .body = fn->body,
+            .builtin_fn = NULL,
+            .next_param_index = idx + 1,
+            .closure = new_closure,
+            .generic_params = fn->generic_params,
+            .genv = genv,
+        };
+        [[maybe_unused]] const clape_value_t arg_garbage = clape_pop_value(vm);
+        [[maybe_unused]] const clape_value_t callee_garbage = clape_pop_value(vm);
+        clape_push_value(vm,
+            (clape_value_t){
+                .type = {.tag = CLAPE_TYPE_FUNC},
+                .u.fn = partial,
+            });
+        clape_pop_frame(vm);
+        return true;
+    }
+
+    // Stage 3: body finished, its result is on the value stack
+    const clape_value_t result = clape_pop_value(vm);
+    [[maybe_unused]] const clape_value_t arg = clape_pop_value(vm);
+    const clape_value_t callee = clape_pop_value(vm);
+    clape_fn_t *const fn = callee.u.fn;
+    clape_generic_binding_t *genv = vm->top->genv;
+
+    if (!clape_type_is_compatible(&result, &fn->return_type, &genv)) {
+        fprintf(stderr, "Type error: function returned %s, expected %s\n",
+            clape_type_tag_name(result.type.tag), clape_type_tag_name(fn->return_type.tag));
+        clape_genv_free(genv);
+        return false;
+    }
+    clape_genv_free(genv);
+    clape_push_value(vm, result);
+    clape_pop_frame(vm);
+    return true;
+}
+
+static void clape_eval_expr_block(clape_vm_t *const vm) {
+    clape_env_t **const env = &vm->top->env;
+    size_t *const stage = &vm->top->eval_stage;
+    clape_expr_t *const expr = vm->top->expr;
+    const size_t block_count = expr->u.block.stmts->len;
+
+    if (*stage > 0 && *stage <= block_count) {
+        clape_stmt_t *const last_stmt = ACCESS_ARR_AT(      //
+            clape_stmt_t, expr->u.block.stmts, (*stage) - 1 //
+        );
+        if (last_stmt->tag == CLAPE_STMT_LET) {
+            clape_value_t value = clape_pop_value(vm);
+            if (strcmp(last_stmt->u.let.name, "_") != 0) {
+                clape_env_t *const binding = malloc(sizeof(clape_env_t));
+                *binding = (clape_env_t){
+                    .name = strdup(last_stmt->u.let.name),
+                    .value = value,
+                    .next = *env,
+                };
+                if (binding->value.type.tag == CLAPE_TYPE_FUNC &&
+                    !binding->value.u.fn->is_builtin) {
+                    // Make the function see itself in its closure
+                    clape_env_t *const self_binding = malloc(sizeof(clape_env_t));
+                    *self_binding = (clape_env_t){
+                        .name = strdup(binding->name),
+                        .value = binding->value,
+                        .next = *env,
+                    };
+                    binding->value.u.fn->closure = self_binding;
+                }
+                *env = binding;
             }
         }
     }
 
-    clape_env_free(env);
+    if (*stage == block_count) {
+        (*stage)++;
+        if (expr->u.block.return_expr) {
+            clape_push_frame(vm, expr->u.block.return_expr);
+            return;
+        }
+        clape_push_value(vm, (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}});
+    }
+    if (*stage > block_count) {
+        clape_env_free(*env);
+        clape_pop_frame(vm);
+        return;
+    }
+
+    clape_stmt_t *const stmt = ACCESS_ARR_AT(clape_stmt_t, expr->u.block.stmts, *stage);
+    (*stage)++;
+    if (stmt->tag == CLAPE_STMT_USE) {
+        clape_eval_stmt_use(stmt, env);
+        return;
+    }
+
+    clape_push_frame(vm, &stmt->u.let.expr);
+}
+
+clape_value_t clape_interpret(clape_program_t *const program) {
+    // The whole program is considered to be one giant block, this means that the initial
+    // "expression" we evaluate is a block expression, a single block containing the whole program
+    clape_vm_t vm = {0};
+    clape_expr_t *const main_expr = (clape_expr_t *)malloc(sizeof(clape_expr_t));
+    *main_expr = (clape_expr_t){
+        .tag = CLAPE_EXPR_BLOCK,
+        .u.block = {.stmts = program->statements, .return_expr = NULL},
+    };
+    clape_push_frame(&vm, main_expr);
+    vm.values = clape_arr_create(sizeof(clape_value_t), 0);
+
+    while (vm.top != NULL) {
+        switch (vm.top->expr->tag) {
+            case CLAPE_EXPR_LIT:
+                if (!clape_eval_expr_lit(&vm)) {
+                    // TODO: Retrun a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_IDENT:
+                if (!clape_eval_expr_ident(&vm)) {
+                    // TODO: Return a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_UNARY:
+                if (!clape_eval_expr_unary(&vm)) {
+                    // TODO: Return a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_BINOP:
+                if (!clape_eval_expr_binop(&vm)) {
+                    // TODO: Return a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_IF:
+                if (!clape_eval_expr_if(&vm)) {
+                    // TODO: Return a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_LAMBDA:
+                clape_eval_expr_lambda(&vm);
+                break;
+            case CLAPE_EXPR_LIST:
+                clape_eval_expr_list(&vm);
+                break;
+            case CLAPE_EXPR_MATCH:
+                if (!clape_eval_expr_match(&vm)) {
+                    // TODO: Return a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_PRODUCT_TYPE:
+                [[fallthrough]];
+            case CLAPE_EXPR_SUM_TYPE:
+                [[fallthrough]];
+            case CLAPE_EXPR_TYPE:
+                clape_pop_frame(&vm);
+                clape_push_value(&vm, (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}});
+                break;
+            case CLAPE_EXPR_SUM:
+                clape_eval_expr_sum(&vm);
+                break;
+            case CLAPE_EXPR_FIELD:
+                clape_eval_expr_field(&vm);
+                break;
+            case CLAPE_EXPR_FIELD_ACCESS:
+                if (!clape_eval_expr_field_access(&vm)) {
+                    // TODO: Return a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_CALL:
+                if (!clape_eval_expr_call(&vm)) {
+                    // TODO: Return a Unit on error?
+                }
+                break;
+            case CLAPE_EXPR_BLOCK: {
+                clape_eval_expr_block(&vm);
+                break;
+            }
+        }
+    }
+    return clape_pop_value(&vm);
 }
 
 #endif
