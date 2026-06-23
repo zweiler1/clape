@@ -368,6 +368,7 @@ typedef enum {
 /// @brief The enum for unary operator types
 typedef enum {
     CLAPE_UNOP_NOT,
+    CLAPE_UNOP_NEG,
 } clape_unop_e;
 
 /// @enum `clape_expr_e`
@@ -2256,6 +2257,15 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
             };
             break;
         }
+        case TOK_MINUS: {
+            clape_expr_t *op = malloc(sizeof(clape_expr_t));
+            *op = clape_parse_expr(p, CLAPE_BINDING_POWER_CALL);
+            lhs = (clape_expr_t){
+                .tag = CLAPE_EXPR_UNARY,
+                .u.unary = {.op = CLAPE_UNOP_NEG, .operand = op},
+            };
+            break;
+        }
         case TOK_LPAREN: {
             token_t *next = clape_peek(p);
             bool is_lambda = false;
@@ -2625,6 +2635,7 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
         clape_binding_power_t cur_bp = clape_infix_bp(next);
 
         if (cur_bp <= min_bp && CLAPE_BINDING_POWER_CALL > min_bp &&
+            lhs.tag != CLAPE_EXPR_LAMBDA && lhs.tag != CLAPE_EXPR_BLOCK &&
             (next == TOK_INT || next == TOK_FLOAT || next == TOK_TRUE || next == TOK_FALSE ||
                 next == TOK_NOT || next == TOK_LPAREN || next == TOK_LBRACE ||
                 next == TOK_LBRACKET || next == TOK_MATCH || next == TOK_IDENTIFIER ||
@@ -4409,15 +4420,32 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
     // The operand expression is stored in the value stack of the vm, we apply the unary operation
     // on the value and pop this frame from the eval stack.
     clape_value_t *const result = clape_peek_value(vm);
-    if (result->type.tag != CLAPE_TYPE_BOOL) {
-        fprintf(stderr, "not requires a Bool operand\n");
-        clape_pop_frame(vm);
-        return false;
+    switch (vm->top->expr->u.unary.op) {
+        case CLAPE_UNOP_NOT: {
+            if (result->type.tag != CLAPE_TYPE_BOOL) {
+                fprintf(stderr, "not requires a Bool operand\n");
+                clape_pop_frame(vm);
+                return false;
+            }
+            *result = (clape_value_t){
+                .type = {.tag = CLAPE_TYPE_BOOL},
+                .u.bval = !result->u.bval,
+            };
+            break;
+        }
+        case CLAPE_UNOP_NEG: {
+            if (result->type.tag == CLAPE_TYPE_INT) {
+                result->u.ival = -result->u.ival;
+            } else if (result->type.tag == CLAPE_TYPE_FLOAT) {
+                result->u.fval = -result->u.fval;
+            } else {
+                fprintf(stderr, "Negation requires Int or Float operand\n");
+                clape_pop_frame(vm);
+                return false;
+            }
+            break;
+        }
     }
-    *result = (clape_value_t){
-        .type = {.tag = CLAPE_TYPE_BOOL},
-        .u.bval = !result->u.bval,
-    };
     clape_pop_frame(vm);
     return true;
 }
