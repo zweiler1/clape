@@ -352,6 +352,7 @@ typedef enum {
     CLAPE_BINOP_SUB,
     CLAPE_BINOP_MUL,
     CLAPE_BINOP_DIV,
+    CLAPE_BINOP_MOD,
     CLAPE_BINOP_LT,
     CLAPE_BINOP_GT,
     CLAPE_BINOP_LE,
@@ -756,6 +757,7 @@ typedef enum : uint8_t {
     TOK_MINUS,
     TOK_MUL,
     TOK_DIV,
+    TOK_MOD,
     TOK_EQ,
     TOK_EQ_EQ,
     TOK_NE,
@@ -1306,6 +1308,14 @@ clape_arr_t *clape_tokenize(char *const file_content) {
             current_column++;
             continue;
         }
+        if (*p == '%') {
+            token_t t = {.tag = TOK_MOD};
+            RECORD_TOKEN_POS(t);
+            clape_arr_append(sizeof(token_t), &tokens, &t);
+            p++;
+            current_column++;
+            continue;
+        }
         if (*p == '(') {
             token_t t = {.tag = TOK_LPAREN};
             RECORD_TOKEN_POS(t);
@@ -1440,6 +1450,9 @@ void clape_print_token(FILE *const stream, const token_t *const token) {
             break;
         case TOK_DIV:
             fprintf(stream, "/");
+            break;
+        case TOK_MOD:
+            fprintf(stream, "%%");
             break;
         case TOK_EQ:
             fprintf(stream, "=");
@@ -1584,6 +1597,7 @@ void clape_free_tokens(clape_arr_t *const tokens) {
             case TOK_MINUS:
             case TOK_MUL:
             case TOK_DIV:
+            case TOK_MOD:
             case TOK_EQ:
             case TOK_EQ_EQ:
             case TOK_NE:
@@ -2025,6 +2039,7 @@ static clape_binding_power_t clape_infix_bp(token_type_e tag) {
             return CLAPE_BINDING_POWER_TERM;
         case TOK_MUL:
         case TOK_DIV:
+        case TOK_MOD:
             return CLAPE_BINDING_POWER_FACTOR;
         case TOK_AND:
         case TOK_OR:
@@ -2634,8 +2649,8 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
 
         clape_binding_power_t cur_bp = clape_infix_bp(next);
 
-        if (cur_bp <= min_bp && CLAPE_BINDING_POWER_CALL > min_bp &&
-            lhs.tag != CLAPE_EXPR_LAMBDA && lhs.tag != CLAPE_EXPR_BLOCK &&
+        if (cur_bp <= min_bp && CLAPE_BINDING_POWER_CALL > min_bp && lhs.tag != CLAPE_EXPR_LAMBDA &&
+            lhs.tag != CLAPE_EXPR_BLOCK &&
             (next == TOK_INT || next == TOK_FLOAT || next == TOK_TRUE || next == TOK_FALSE ||
                 next == TOK_NOT || next == TOK_LPAREN || next == TOK_LBRACE ||
                 next == TOK_LBRACKET || next == TOK_MATCH || next == TOK_IDENTIFIER ||
@@ -2720,6 +2735,10 @@ static clape_expr_t clape_parse_expr(clape_parser_t *p, clape_binding_power_t mi
                 break;
             case TOK_DIV:
                 op = CLAPE_BINOP_DIV;
+                cur_bp = CLAPE_BINDING_POWER_FACTOR;
+                break;
+            case TOK_MOD:
+                op = CLAPE_BINOP_MOD;
                 cur_bp = CLAPE_BINDING_POWER_FACTOR;
                 break;
             case TOK_EQ_EQ:
@@ -3278,6 +3297,9 @@ static void clape_print_expr(FILE *stream, clape_expr_t *expr) {
                     break;
                 case CLAPE_BINOP_DIV:
                     op_str = "/";
+                    break;
+                case CLAPE_BINOP_MOD:
+                    op_str = "%";
                     break;
                 case CLAPE_BINOP_EQ:
                     op_str = "==";
@@ -4595,6 +4617,7 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
         case CLAPE_BINOP_SUB:
         case CLAPE_BINOP_MUL:
         case CLAPE_BINOP_DIV:
+        case CLAPE_BINOP_MOD:
             if (lhs.type.tag != rhs.type.tag) {
                 fprintf(stderr, "Type mismatch in arithmetic: cannot mix types\n");
                 clape_pop_frame(vm);
@@ -4619,6 +4642,9 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                             break;
                         case CLAPE_BINOP_DIV:
                             r = (int64_t)lhs.u.cval / (int64_t)rhs.u.cval;
+                            break;
+                        case CLAPE_BINOP_MOD:
+                            r = (int64_t)lhs.u.cval % (int64_t)rhs.u.cval;
                             break;
                         default:
                             clape_pop_frame(vm);
@@ -4646,6 +4672,9 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                         case CLAPE_BINOP_DIV:
                             r = lhs.u.ival / rhs.u.ival;
                             break;
+                        case CLAPE_BINOP_MOD:
+                            r = lhs.u.ival % rhs.u.ival;
+                            break;
                         default:
                             clape_pop_frame(vm);
                             return false;
@@ -4672,6 +4701,10 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                         case CLAPE_BINOP_DIV:
                             r = lhs.u.fval / rhs.u.fval;
                             break;
+                        case CLAPE_BINOP_MOD:
+                            fprintf(stderr, "Modulo requires Int, not Float\n");
+                            clape_pop_frame(vm);
+                            return false;
                         default:
                             return false;
                     }
