@@ -4533,6 +4533,31 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
                 default:
                     fprintf(stderr, "Arithmetic requires Int or Float\n");
                     return false;
+                case CLAPE_TYPE_CHAR: {
+                    int64_t r;
+                    switch (op) {
+                        case CLAPE_BINOP_ADD:
+                            r = (int64_t)lhs.u.cval + (int64_t)rhs.u.cval;
+                            break;
+                        case CLAPE_BINOP_SUB:
+                            r = (int64_t)lhs.u.cval - (int64_t)rhs.u.cval;
+                            break;
+                        case CLAPE_BINOP_MUL:
+                            r = (int64_t)lhs.u.cval * (int64_t)rhs.u.cval;
+                            break;
+                        case CLAPE_BINOP_DIV:
+                            r = (int64_t)lhs.u.cval / (int64_t)rhs.u.cval;
+                            break;
+                        default:
+                            return false;
+                    }
+                    clape_push_value(vm,
+                        (clape_value_t){
+                            .type = {.tag = CLAPE_TYPE_INT},
+                            .u.ival = r,
+                        });
+                    break;
+                }
                 case CLAPE_TYPE_INT: {
                     int64_t r;
                     switch (op) {

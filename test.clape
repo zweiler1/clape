@@ -13,7 +13,16 @@ let print_list<T> = (list: [T]) -> Unit {
 let lines = load_file "test.clape"
 let _ = print_list lines
 
+let _ = {
+    let _ = print "--- Char->Int ---"
 
+    let c = '8'
+    let x = c - '0'
+    let _ = print x
+}
+
+
+let _ = print {}
 let _ = {
     let _ = print "--- Option<T> ---"
     let Option<T> = Some(T) | None
