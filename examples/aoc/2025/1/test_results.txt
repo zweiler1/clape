@@ -1,13 +1,13 @@
 Clape:
-Benchmark  (14 runs): clape ./main.clape
+Benchmark 2 (28 runs): clape ./main.clape
   measurement          mean ± σ            min … max           outliers
-  wall_time           374ms ± 11.4ms     359ms …  400ms          0 ( 0%)
-  peak_rss           11.0MB ± 47.0KB    11.0MB … 11.1MB          0 ( 0%)
-  cpu_cycles         1.65G  ± 45.1M     1.59G  … 1.74G           0 ( 0%)
-  instructions        817M  ± 24.9       817M  …  817M           0 ( 0%)
-  cache_references    213M  ± 4.68M      206M  …  220M           0 ( 0%)
-  cache_misses       46.4M  ± 2.67M     42.6M  … 51.2M           0 ( 0%)
-  branch_misses       454K  ± 14.8K      428K  …  470K           0 ( 0%)
+  wall_time           184ms ± 3.63ms     177ms …  190ms          0 ( 0%)
+  peak_rss           11.0MB ± 82.6KB    10.9MB … 11.2MB          5 (18%)
+  cpu_cycles          768M  ± 14.3M      733M  …  795M           1 ( 4%)
+  instructions        919M  ± 8.60       919M  …  919M           0 ( 0%)
+  cache_references   85.3M  ± 1.92M     80.6M  … 89.1M           1 ( 4%)
+  cache_misses       20.3M  ±  910K     17.9M  … 21.8M           1 ( 4%)
+  branch_misses       544K  ± 27.6K      486K  …  594K           0 ( 0%)
 
 Flint:
 Benchmark 1 (3224 runs): ./main

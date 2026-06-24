@@ -4246,9 +4246,7 @@ static clape_cons_t *clape_clone_cons(clape_cons_t *list) {
     if (list == NULL) {
         return NULL;
     }
-    for (clape_cons_t *n = list; n; n = n->tail) {
-        n->arc++;
-    }
+    list->arc++;
     return list;
 }
 
