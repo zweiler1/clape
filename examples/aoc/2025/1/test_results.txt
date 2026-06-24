@@ -1,5 +1,96 @@
-Clape:
-Benchmark 2 (210 runs): clape ./main.clape
+Benchmarks, sorted by speed. Note that these benchmarks do not represent the languages overall, they only test
+
+C: (compiled with `clang main.c -o main_c`)
+Benchmark 1 (5021 runs): ./main_c
+  measurement          mean ± σ            min … max           outliers
+  wall_time           950us ±  206us     514us … 1.98ms         95 ( 2%)
+  peak_rss           1.83MB ± 61.8KB    1.54MB … 1.86MB       1219 (24%)
+  cpu_cycles          874K  ± 7.31K      810K  … 1.12M         111 ( 2%)
+  instructions       1.08M  ± 1.05      1.08M  … 1.08M         203 ( 4%)
+  cache_references   18.1K  ±  521      17.0K  … 22.7K          35 ( 1%)
+  cache_misses       5.62K  ±  286      5.03K  … 7.13K         519 (10%)
+  branch_misses      9.90K  ±  120      8.07K  … 10.5K         162 ( 3%)
+
+Zig: (compiled with `zig build-exe -fllvm main.zig --name main_zig`)
+Benchmark 1 (4454 runs): ./main_zig
+  measurement          mean ± σ            min … max           outliers
+  wall_time          1.08ms ±  230us     611us … 1.72ms          0 ( 0%)
+  peak_rss           1.37MB ± 17.0KB    1.18MB … 1.37MB         71 ( 2%)
+  cpu_cycles         1.42M  ± 30.1K     1.35M  … 2.02M          62 ( 1%)
+  instructions       2.70M  ± 2.66      2.70M  … 2.70M           0 ( 0%)
+  cache_references   14.2K  ±  563      12.8K  … 18.0K          98 ( 2%)
+  cache_misses       2.25K  ±  205      1.85K  … 3.49K         486 (11%)
+  branch_misses      7.93K  ±  633      6.23K  … 9.53K          67 ( 2%)
+
+Rust: (compiled with `rustc main.rs -o main_rs`)
+Benchmark 1 (3591 runs): ./main_rs
+  measurement          mean ± σ            min … max           outliers
+  wall_time          1.35ms ±  284us     831us … 2.05ms          0 ( 0%)
+  peak_rss           2.38MB ± 63.0KB    2.03MB … 2.52MB        157 ( 4%)
+  cpu_cycles         1.75M  ± 21.5K     1.72M  … 2.35M         188 ( 5%)
+  instructions       4.13M  ±  401      4.13M  … 4.13M           9 ( 0%)
+  cache_references   25.9K  ±  634      24.5K  … 30.5K          74 ( 2%)
+  cache_misses       8.03K  ±  324      7.42K  … 9.86K         179 ( 5%)
+  branch_misses      14.0K  ±  207      13.4K  … 15.0K         176 ( 5%)
+
+Flint: (compiled with `flintc --file main.ft -o main_ft`)
+Benchmark 1 (3333 runs): ./main_ft
+  measurement          mean ± σ            min … max           outliers
+  wall_time          1.45ms ±  306us     892us … 2.34ms          0 ( 0%)
+  peak_rss           2.25MB ± 69.1KB    1.90MB … 2.39MB        720 (22%)
+  cpu_cycles         2.13M  ± 39.1K     2.06M  … 2.68M          68 ( 2%)
+  instructions       6.39M  ±  375      6.39M  … 6.40M           9 ( 0%)
+  cache_references   37.7K  ± 2.54K     33.8K  … 87.7K         103 ( 3%)
+  cache_misses       7.15K  ±  425      6.39K  … 9.57K         106 ( 3%)
+  branch_misses      11.1K  ±  950      9.21K  … 17.0K           3 ( 0%)
+
+
+Go: (compiled with `go build -o main_go main.go`)
+Benchmark 1 (3074 runs): ./main_go
+  measurement          mean ± σ            min … max           outliers
+  wall_time          1.59ms ±  263us     983us … 2.62ms          2 ( 0%)
+  peak_rss           5.26MB ± 1.00MB    2.34MB … 8.12MB          0 ( 0%)
+  cpu_cycles         1.12M  ± 48.1K     1.02M  … 1.42M          42 ( 1%)
+  instructions       2.17M  ± 44.9K     2.10M  … 2.31M           0 ( 0%)
+  cache_references   69.2K  ± 4.60K     54.1K  … 93.5K          27 ( 1%)
+  cache_misses       19.3K  ± 1.36K     15.7K  … 24.6K          22 ( 1%)
+  branch_misses      10.0K  ± 1.05K     7.82K  … 13.7K           9 ( 0%)
+
+Lua: (Interpreted)
+Benchmark 1 (1594 runs): lua ./main.lua
+  measurement          mean ± σ            min … max           outliers
+  wall_time          3.09ms ±  433us    2.19ms … 4.89ms         16 ( 1%)
+  peak_rss           2.51MB ±  118KB    2.07MB … 2.73MB          3 ( 0%)
+  cpu_cycles         7.51M  ±  105K     7.35M  … 9.16M          58 ( 4%)
+  instructions       24.1M  ± 68.7K     24.0M  … 24.5M          18 ( 1%)
+  cache_references   87.9K  ± 16.4K     79.9K  …  501K         131 ( 8%)
+  cache_misses       13.2K  ± 1.35K     11.3K  … 19.0K           4 ( 0%)
+  branch_misses      33.3K  ±  791      31.7K  … 36.9K          19 ( 1%)
+
+C++: (compiled with `clang++ main.cpp -o main_cpp`)
+Benchmark 1 (1533 runs): ./main_cpp
+  measurement          mean ± σ            min … max           outliers
+  wall_time          3.21ms ±  437us    2.33ms … 4.71ms          8 ( 1%)
+  peak_rss           4.33MB ± 97.6KB    3.90MB … 4.46MB        179 (12%)
+  cpu_cycles         7.59M  ± 71.9K     7.47M  … 8.39M          86 ( 6%)
+  instructions       17.5M  ± 1.64      17.5M  … 17.5M          16 ( 1%)
+  cache_references   75.9K  ± 4.96K     72.7K  …  170K          63 ( 4%)
+  cache_misses       19.3K  ±  957      17.2K  … 22.8K          13 ( 1%)
+  branch_misses      20.2K  ±  170      19.8K  … 24.2K          37 ( 2%)
+
+Python: (Interpreted)
+Benchmark 1 (390 runs): python ./main.py
+  measurement          mean ± σ            min … max           outliers
+  wall_time          12.8ms ±  762us    11.2ms … 15.3ms         10 ( 3%)
+  peak_rss           12.5MB ±  115KB    12.0MB … 12.6MB          3 ( 1%)
+  cpu_cycles         37.0M  ±  460K     36.2M  … 38.8M          11 ( 3%)
+  instructions       68.9M  ± 34.1K     68.8M  … 69.0M           4 ( 1%)
+  cache_references   3.05M  ± 35.7K     3.02M  … 3.46M          21 ( 5%)
+  cache_misses        624K  ± 6.33K      610K  …  647K           3 ( 1%)
+  branch_misses       437K  ± 3.18K      430K  …  449K           5 ( 1%)
+
+Clape: (Interpreted)
+Benchmark 1 (210 runs): clape ./main.clape
   measurement          mean ± σ            min … max           outliers
   wall_time          23.8ms ±  804us    22.0ms … 27.0ms          2 ( 1%)
   peak_rss           10.4MB ± 96.7KB    10.1MB … 10.6MB          3 ( 1%)
@@ -9,13 +100,3 @@ Benchmark 2 (210 runs): clape ./main.clape
   cache_misses        388K  ± 2.96K      381K  …  397K           1 ( 0%)
   branch_misses       310K  ± 9.16K      296K  …  380K           3 ( 1%)
 
-Flint:
-Benchmark 1 (3224 runs): ./main
-  measurement          mean ± σ            min … max           outliers
-  wall_time          1.50ms ±  346us     856us … 2.93ms         26 ( 1%)
-  peak_rss           2.23MB ± 59.0KB    1.91MB … 2.39MB        472 (15%)
-  cpu_cycles         2.14M  ± 48.3K     2.06M  … 3.30M          54 ( 2%)
-  instructions       6.39M  ±  611      6.39M  … 6.40M         272 ( 8%)
-  cache_references   38.0K  ± 3.27K     34.8K  …  101K          98 ( 3%)
-  cache_misses       7.32K  ±  434      6.51K  … 10.3K          53 ( 2%)
-  branch_misses      11.2K  ± 1.02K     8.99K  … 17.1K           3 ( 0%)
