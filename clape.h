@@ -23,6 +23,10 @@ typedef struct clape_arr_t {
     /// @brief The length of the array
     size_t len;
 
+    /// @var `cap`
+    /// @brief The capacity of the array
+    size_t cap;
+
     /// @var `value`
     /// @brief The payload of the array, allocated as a variable member of bytes where the array
     /// elements are present directly inline in the array structure
@@ -60,12 +64,17 @@ clape_arr_t *clape_arr_create(const size_t type_size, const size_t len) {
     const size_t arr_len = sizeof(clape_arr_t) + len * type_size;
     clape_arr_t *arr = (clape_arr_t *)malloc(arr_len);
     arr->len = len;
+    arr->cap = len;
     return arr;
 }
 
 void clape_arr_append(const size_t type_size, clape_arr_t **const arr, void *const value) {
-    const size_t new_arr_size = sizeof(clape_arr_t) + ((*arr)->len + 1) * type_size;
-    *arr = (clape_arr_t *)realloc(*arr, new_arr_size);
+    if ((*arr)->len >= (*arr)->cap) {
+        const size_t new_cap = (*arr)->cap == 0 ? 4 : (*arr)->cap * 2;
+        const size_t new_arr_size = sizeof(clape_arr_t) + new_cap * type_size;
+        *arr = (clape_arr_t *)realloc(*arr, new_arr_size);
+        (*arr)->cap = new_cap;
+    }
     memcpy(&(*arr)->value[(*arr)->len * type_size], value, type_size);
     (*arr)->len++;
 }
