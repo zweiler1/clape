@@ -4369,26 +4369,12 @@ static void clape_env_free_to(clape_env_t *env, const clape_env_t *const stop) {
     }
 }
 
-static clape_env_t *clape_env_clone(clape_env_t *const env) {
-    if (env == NULL)
-        return NULL;
-    clape_env_t *clone = malloc(sizeof(clape_env_t));
-    *clone = (clape_env_t){
-        .name = strdup(env->name),
-        .value = clape_clone_value(env->value),
-        .next = clape_env_clone(env->next),
-    };
-    return clone;
-}
-
 static void clape_push_frame(clape_vm_t *const vm, clape_expr_t *const expr) {
     clape_frame_t *old_top = vm->top;
     vm->top = (clape_frame_t *)malloc(sizeof(clape_frame_t));
     *vm->top = (clape_frame_t){
         .expr = expr,
-        .env = old_top
-            ? (expr->tag == CLAPE_EXPR_BLOCK ? clape_env_clone(old_top->env) : old_top->env)
-            : NULL,
+        .env = old_top ? old_top->env : NULL,
         .genv = old_top ? old_top->genv : NULL,
         .eval_stage = 0,
         .prev = old_top,
@@ -4399,7 +4385,11 @@ static void clape_push_frame(clape_vm_t *const vm, clape_expr_t *const expr) {
 static void clape_pop_frame(clape_vm_t *const vm) {
     clape_frame_t *to_pop = vm->top;
     if (to_pop->owns_env) {
-        clape_env_free(to_pop->env);
+        if (to_pop->prev) {
+            clape_env_free_to(to_pop->env, to_pop->prev->env);
+        } else {
+            clape_env_free(to_pop->env);
+        }
     }
     vm->top = to_pop->prev;
     free(to_pop);
@@ -4937,14 +4927,9 @@ static void clape_eval_expr_list(clape_vm_t *const vm) {
             if (arm_env != NULL) {
                 (*stage)++;
                 clape_push_frame(vm, &arm->body);
-                if (arm->body.tag == CLAPE_EXPR_BLOCK) {
-                    clape_env_free(vm->top->env);
-                } else {
-                    vm->top->owns_env = true;
-                }
-                vm->top->env = clape_env_clone(arm_env);
+                vm->top->owns_env = true;
+                vm->top->env = arm_env;
                 clape_free_value(scrutinee);
-                clape_env_free_to(arm_env, vm->top->prev->env);
                 return true;
             }
         }
@@ -5083,7 +5068,11 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
                 clape_type_tag_name(param->type.tag), clape_type_tag_name(arg->type.tag));
             clape_genv_free(genv);
             if (vm->top->owns_env) {
-                clape_env_free(vm->top->env);
+                if (vm->top->prev) {
+                    clape_env_free_to(vm->top->env, vm->top->prev->env);
+                } else {
+                    clape_env_free(vm->top->env);
+                }
                 vm->top->owns_env = false;
             }
             clape_pop_frame(vm);
@@ -5101,7 +5090,11 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
             // Full application — store state, push body, defer to stage 3
             (*stage)++;
             if (vm->top->owns_env) {
-                clape_env_free(vm->top->env);
+                if (vm->top->prev) {
+                    clape_env_free_to(vm->top->env, vm->top->prev->env);
+                } else {
+                    clape_env_free(vm->top->env);
+                }
             }
             vm->top->env = new_closure;
             vm->top->owns_env = true;
@@ -5131,7 +5124,11 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
                 .u.fn = partial,
             });
         if (vm->top->owns_env) {
-            clape_env_free(vm->top->env);
+            if (vm->top->prev) {
+                clape_env_free_to(vm->top->env, vm->top->prev->env);
+            } else {
+                clape_env_free(vm->top->env);
+            }
             vm->top->owns_env = false;
         }
         clape_pop_frame(vm);
@@ -5222,7 +5219,7 @@ static void clape_eval_expr_block(clape_vm_t *const vm) {
         clape_push_value(vm, (clape_value_t){.type = {.tag = CLAPE_TYPE_UNIT}});
     }
     if (*stage > block_count) {
-        clape_env_free(*env);
+        vm->top->owns_env = true;
         clape_pop_frame(vm);
         return;
     }
