@@ -3801,8 +3801,8 @@ static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, c
                     .type = {.tag = CLAPE_TYPE_LIST},
                     .u.list = val.u.list->tail,
                 };
-                for (clape_cons_t *n = val.u.list->tail; n; n = n->tail) {
-                    n->arc++;
+                if (val.u.list->tail != NULL) {
+                    val.u.list->tail->arc++;
                 }
             } else if (val.type.tag == CLAPE_TYPE_STRING && strlen(val.u.sval) > 0) {
                 head_val = (clape_value_t){
@@ -5079,7 +5079,7 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         clape_env_t *const new_closure = malloc(sizeof(clape_env_t));
         *new_closure = (clape_env_t){
             .name = strdup(param->name),
-            .value = clape_clone_value(*arg),
+            .value = *arg,
             .next = fn->closure,
         };
 
