@@ -1,1 +1,2 @@
 *.clape linguist-language=OCaml
+*.ft linguist-language=TypeScript
