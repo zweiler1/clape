@@ -5055,7 +5055,12 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
 
         const size_t idx = fn->next_param_index;
         clape_param_t *const param = ACCESS_ARR_AT(clape_param_t, fn->params, idx);
-        clape_generic_binding_t *genv = clape_infer_generic_types(&param->type, arg, fn->genv);
+        clape_generic_binding_t *genv;
+        if (fn->generic_params && fn->generic_params->len > 0) {
+            genv = clape_infer_generic_types(&param->type, arg, fn->genv);
+        } else {
+            genv = fn->genv;
+        }
 
         if (!clape_type_is_compatible(arg, &param->type, &genv)) {
             fprintf(stderr, "Type error: parameter '%s' expected %s, got %s\n", param->name,
