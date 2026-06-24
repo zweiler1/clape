@@ -81,6 +81,58 @@ void clape_arr_append(const size_t type_size, clape_arr_t **const arr, void *con
 
 #endif
 
+// ------ ARRAY_LIST IMPLEMENTATION ------
+
+/// @struct `clape_arr_list_t`
+/// @brief Structure representing a simple dynamic array list. How many elements are inside a single
+/// array node is implementation-internal
+typedef struct clape_arr_list_t {
+    /// @var `next`
+    /// @brief The next array-list node
+    struct clape_arr_list_t *next;
+
+    /// @var `used`
+    /// @brief Number of used elements inside this array list node
+    size_t used;
+
+    /// @var `value`
+    /// @brief The payload of the array, allocated as a variable member of bytes where the array
+    /// elements are present directly inline in the array structure
+    char value[];
+} clape_arr_list_t;
+
+/// @function `clape_arr_list_create`
+/// @brief Creates a new dynamic arr_list of size `len` where each element is of size `type_size`
+///
+/// @param `len` The length of the array to create
+/// @param `type_size` The size of the type which is meant to be put into the array
+/// @return `clape_arr_t *` A newly created array of size `len`
+clape_arr_list_t *clape_arr_list_create(const size_t type_size, const size_t len);
+
+#ifdef CLAPE_IMPLEMENTATION
+
+#define ARR_LIST_LEN 64
+
+clape_arr_list_t *clape_arr_list_create(const size_t type_size, const size_t len) {
+    const size_t needed_nodes = len / ARR_LIST_LEN + 1;
+    const size_t node_size = sizeof(clape_arr_list_t) + ARR_LIST_LEN * type_size;
+    clape_arr_list_t *const first = (clape_arr_list_t *)malloc(node_size);
+    first->next = NULL;
+    first->used = 0;
+    clape_arr_list_t *last = first;
+    for (size_t i = 1; i < needed_nodes; i++) {
+        last->next = (clape_arr_list_t *)malloc(node_size);
+        last = last->next;
+        last->used = 0;
+    }
+    return first;
+}
+
+#define ARR_LIST_FRONT(type, list)                                                                 \
+    ((type *)(void *)&(list)->value[((ARR_LIST_LEN) - (list)->used) * sizeof(type)])
+
+#endif
+
 // ------ UTILITY -----
 
 // Helper to generate unique names using __COUNTER__
@@ -760,6 +812,14 @@ typedef struct clape_vm_t {
     ///        pushed to the stack. For example to evaluate a binary operation we need to store both
     ///        the lhs and the rhs of the binop in the value stack.
     clape_arr_t *values;
+
+    /// @var `frames`
+    /// @brief Reverse array list for frame storage. Each block holds ARR_LIST_LEN frames.
+    ///        Frames are stored from the end of each block's value buffer, so prepending
+    ///        (pushing a new top frame) is O(1). When a block fills up, a new block is
+    ///        allocated and prepended to the list. This is used to reduce memory allocation /
+    ///        freeing churn by a lot
+    clape_arr_list_t *frames;
 } clape_vm_t;
 
 /// @enum `token_type_e`
@@ -4369,20 +4429,34 @@ static void clape_env_free_to(clape_env_t *env, const clape_env_t *const stop) {
 }
 
 static void clape_push_frame(clape_vm_t *const vm, clape_expr_t *const expr) {
-    clape_frame_t *old_top = vm->top;
-    vm->top = (clape_frame_t *)malloc(sizeof(clape_frame_t));
-    *vm->top = (clape_frame_t){
-        .expr = expr,
-        .env = old_top ? old_top->env : NULL,
-        .genv = old_top ? old_top->genv : NULL,
-        .eval_stage = 0,
-        .prev = old_top,
-        .owns_env = false,
-    };
+    clape_frame_t *const old_top = vm->top;
+    clape_arr_list_t *list = vm->frames;
+
+    if (list == NULL || list->used == ARR_LIST_LEN) {
+        const size_t node_size = sizeof(clape_arr_list_t) + ARR_LIST_LEN * sizeof(clape_frame_t);
+        clape_arr_list_t *const new_list = (clape_arr_list_t *)malloc(node_size);
+        new_list->next = list;
+        new_list->used = 0;
+        list = new_list;
+        vm->frames = list;
+    }
+
+    clape_frame_t *const new_frame = (clape_frame_t *)(void *)&list->value[ //
+        (ARR_LIST_LEN - 1 - list->used) * sizeof(clape_frame_t)             //
+    ];
+    list->used++;
+
+    new_frame->expr = expr;
+    new_frame->env = old_top ? old_top->env : NULL;
+    new_frame->genv = old_top ? old_top->genv : NULL;
+    new_frame->eval_stage = 0;
+    new_frame->prev = old_top;
+    new_frame->owns_env = false;
+    vm->top = new_frame;
 }
 
 static void clape_pop_frame(clape_vm_t *const vm) {
-    clape_frame_t *to_pop = vm->top;
+    clape_frame_t *const to_pop = vm->top;
     if (to_pop->owns_env) {
         if (to_pop->prev) {
             clape_env_free_to(to_pop->env, to_pop->prev->env);
@@ -4391,7 +4465,13 @@ static void clape_pop_frame(clape_vm_t *const vm) {
         }
     }
     vm->top = to_pop->prev;
-    free(to_pop);
+
+    clape_arr_list_t *const list = vm->frames;
+    list->used--;
+    if (list->used == 0) {
+        vm->frames = list->next;
+        free(list);
+    }
 }
 
 [[nodiscard]] static clape_value_t clape_pop_value(clape_vm_t *const vm) {
