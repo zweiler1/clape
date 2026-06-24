@@ -3733,6 +3733,8 @@ clape_value_t clape_interpret(clape_program_t *const program);
 
 #ifdef CLAPE_IMPLEMENTATION
 
+static clape_value_t clape_clone_value(clape_value_t val);
+
 static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, clape_env_t *env) {
     switch (pat->tag) {
         case CLAPE_PATTERN_ANY:
@@ -3783,7 +3785,7 @@ static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, c
                 clape_env_t *const binding = malloc(sizeof(clape_env_t));
                 *binding = (clape_env_t){
                     .name = strdup(pat->u.sum.var),
-                    .value = *val.u.sum.value,
+                    .value = clape_clone_value(*val.u.sum.value),
                     .next = env,
                 };
                 return binding;
@@ -3794,15 +3796,7 @@ static clape_env_t *clape_match_value(clape_value_t val, clape_pattern_t *pat, c
             clape_value_t head_val;
             clape_value_t tail_val;
             if (val.type.tag == CLAPE_TYPE_LIST && val.u.list != NULL) {
-                head_val = val.u.list->head;
-                if (head_val.type.tag == CLAPE_TYPE_STRING) {
-                    head_val.u.sval = strdup(head_val.u.sval);
-                }
-                if (head_val.type.tag == CLAPE_TYPE_LIST && head_val.u.list) {
-                    for (clape_cons_t *n = head_val.u.list; n; n = n->tail) {
-                        n->arc++;
-                    }
-                }
+                head_val = clape_clone_value(val.u.list->head);
                 tail_val = (clape_value_t){
                     .type = {.tag = CLAPE_TYPE_LIST},
                     .u.list = val.u.list->tail,
@@ -5082,7 +5076,7 @@ static void clape_eval_expr_field(clape_vm_t *const vm) {
         clape_env_t *const new_closure = malloc(sizeof(clape_env_t));
         *new_closure = (clape_env_t){
             .name = strdup(param->name),
-            .value = *arg,
+            .value = clape_clone_value(*arg),
             .next = fn->closure,
         };
 
