@@ -4148,6 +4148,7 @@ static clape_value_t clape_builtin_load_file(clape_value_t arg) {
     char *const loaded_file = load_file(file_path);
     defer(free, loaded_file);
     clape_cons_t *list_values = NULL;
+    clape_cons_t **tail_ptr = &list_values;
     char *start = loaded_file;
     char *end = loaded_file;
 
@@ -4160,16 +4161,13 @@ static clape_value_t clape_builtin_load_file(clape_value_t arg) {
                 memcpy(sval, start, len);
             }
             sval[len] = '\0';
-            clape_cons_t **last_value = &list_values;
-            while (*last_value != NULL) {
-                last_value = &(*last_value)->tail;
-            }
-            *last_value = (clape_cons_t *)malloc(sizeof(clape_cons_t));
-            **last_value = (clape_cons_t){
+            *tail_ptr = (clape_cons_t *)malloc(sizeof(clape_cons_t));
+            **tail_ptr = (clape_cons_t){
                 .arc = 1,
                 .head = {.type = {.tag = CLAPE_TYPE_STRING}, .u.sval = sval},
                 .tail = NULL,
             };
+            tail_ptr = &(*tail_ptr)->tail;
             start = end + 1;
         }
         if (*end == '\0') {
