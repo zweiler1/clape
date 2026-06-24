@@ -1,18 +1,38 @@
 use Print
 use File
 
-let print_list<T> = (list: [T]) -> Unit {
-    match list {
-        [] => {};
-        head :: tail => {
-            let _ = print head;
-            print_list tail
+let _ = {
+    let _ = print "--- Load File and Print List ---"
+    let print_list<T> = (list: [T]) -> Unit {
+        match list {
+            [] => {};
+            head :: tail => {
+                let _ = print head;
+                print_list tail
+            }
         }
     }
-}
-let lines = load_file "test.clape"
-let _ = print_list lines
 
+    let lines = load_file "test.clape"
+    let _ = print_list lines
+}
+
+let _ = print {}
+let _ = {
+    let _ = print "--- Shadowing ---"
+
+    let x = 10
+    let y = 20
+    let x = x + y
+    let y = {
+        let z = 8
+        let x = x * x;
+        x + z
+    };
+    print y
+}
+
+let _ = print {}
 let _ = {
     let _ = print "--- Char->Int ---"
 
