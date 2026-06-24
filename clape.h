@@ -4747,8 +4747,8 @@ static clape_value_t *clape_peek_value(clape_vm_t *const vm) {
             if (rhs.type.tag == CLAPE_TYPE_LIST) {
                 clape_cons_t *node = malloc(sizeof(clape_cons_t));
                 *node = (clape_cons_t){.head = lhs, .tail = rhs.u.list, .arc = 1};
-                for (clape_cons_t *n = rhs.u.list; n; n = n->tail) {
-                    n->arc++;
+                if (rhs.u.list != NULL) {
+                    rhs.u.list->arc++;
                 }
                 clape_push_value(vm,
                     (clape_value_t){
